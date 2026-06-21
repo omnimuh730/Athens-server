@@ -4,8 +4,8 @@ import { isNeo4jReady } from '../../db/neo4j.js';
 import { normalizeSkillKey, normalizeSurfaceForm } from '../skillGraph/normalize.js';
 import { enrichSkillList, getGraphCounts } from '../skillEnrichment/processSkill.js';
 import { recordCooccurrenceForJob } from '../skillCooccurrence/index.js';
-import { computeSkillScoreValue, SKILL_SCORE_VERSION } from '../skillScoreService.js';
 import { attachStaticScoreFields } from '../jobListPipeline.js';
+import { upsertJobEmbeddingAsync } from '../embeddings/embeddingIngest.js';
 import {
 	resolveLlmConfig,
 	isEnrichmentEnabled,
@@ -68,14 +68,13 @@ export async function getJobAnalysisStatus(jobId) {
 
 	const job = await jobsCollection.findOne(
 		{ _id: objectId },
-		{ projection: { skillAnalysis: 1, skillScore: 1, skills: 1 } },
+		{ projection: { skillAnalysis: 1, skills: 1 } },
 	);
 	if (!job) throw new Error('Job not found');
 
 	return {
 		jobId: String(objectId),
 		skillAnalysis: job.skillAnalysis || { status: 'pending' },
-		skillScore: job.skillScore ?? 0,
 		skills: job.skills || [],
 	};
 }
@@ -137,7 +136,6 @@ async function runJobAnalysis(job) {
 		coocStats = await recordCooccurrenceForJob(skills, { jobId });
 	}
 
-	const skillScore = await computeSkillScoreValue(skills);
 	const staticScores = attachStaticScoreFields({ ...job, skills });
 	const graphCounts = await getGraphCounts();
 	const now = new Date().toISOString();
@@ -162,8 +160,6 @@ async function runJobAnalysis(job) {
 		{ _id: job._id },
 		{
 			$set: {
-				skillScore,
-				skillScoreVersion: SKILL_SCORE_VERSION,
 				...staticScores,
 				skillAnalysis: {
 					status: 'analyzed',
@@ -203,12 +199,12 @@ async function runJobAnalysis(job) {
 	traceJobAnalysis('complete', {
 		jobId,
 		skillsEnriched: enrichmentResults.length,
-		skillScore,
 		llmCost: formatCostUsd(llmUsage?.cost),
 	});
 
+	upsertJobEmbeddingAsync(jobId, { applierName });
+
 	return {
-		skillScore,
 		skillsProcessed: enrichmentResults.length,
 		enrichmentResults,
 		usage: llmUsage,
@@ -243,7 +239,7 @@ export async function runJobAnalysisBatch(batchSize = 2) {
 			processed += 1;
 			console.log(
 				`[job-analysis] analyzed job ${job._id} (${job.title || 'untitled'}) — `
-				+ `${result.skillsProcessed} skill(s) enriched, skillScore=${result.skillScore}`
+				+ `${result.skillsProcessed} skill(s) enriched`
 				+ (result.usage?.cost != null ? `, AI cost=${formatCostUsd(result.usage.cost)} (${formatUsageSummary(result.usage)})` : ''),
 			);
 		} catch (err) {

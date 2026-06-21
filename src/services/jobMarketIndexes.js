@@ -4,7 +4,6 @@ export async function ensureJobMarketIndexes(jobsCollection) {
 	if (!jobsCollection) return;
 	await Promise.all([
 		jobsCollection.createIndex({ postedAt: -1 }),
-		jobsCollection.createIndex({ skillScore: -1 }),
 		jobsCollection.createIndex({ scoreSalary: -1 }),
 		jobsCollection.createIndex({ scoreApplicant: -1 }),
 		jobsCollection.createIndex({ url: 1 }),

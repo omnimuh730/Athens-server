@@ -8,12 +8,13 @@ import {
 } from "../db/mongo.js";
 import { JobSourceTitles } from '../config/jobSources.js';
 import { isJobBlocked, buildMongoQueryForRule, isMatchNoneQuery } from '../utils/ruleMatcher.js';
-import { SKILL_SCORE_VERSION } from '../services/skillScoreService.js';
 import { buildMongoCaseInsensitiveRegexFilter, buildSafeRegExp } from '../utils/safeRegex.js';
 import { attachStaticScoreFields, needsScorePipeline, runJobListAggregation } from '../services/jobListPipeline.js';
 import { queueJobAnalysis, getJobAnalysisStatus } from '../services/jobAnalysis/index.js';
 import { enqueueSkills } from '../services/skillEnrichment/queue.js';
 import { recordCooccurrenceForJob } from '../services/skillCooccurrence/index.js';
+import { recommendJobsForApplier } from '../services/recommendation/recommendationService.js';
+import { upsertJobEmbeddingAsync } from '../services/embeddings/embeddingIngest.js';
 
 const SCORE_DIMENSIONS = {
 	overall: 'overallScore',
@@ -146,11 +147,13 @@ export async function createJob(req, res) {
 
 		// MongoDB only on ingest — world graph enrichment runs from Knowledge Graph page.
 		job.skillAnalysis = { status: 'pending' };
-		job.skillScore = 0;
-		job.skillScoreVersion = SKILL_SCORE_VERSION;
 		Object.assign(job, attachStaticScoreFields({ ...job, skills }));
 
 		const result = jobsCollection ? await jobsCollection.insertOne(job) : null;
+
+		if (result?.insertedId) {
+			upsertJobEmbeddingAsync(String(result.insertedId));
+		}
 
 		// Enqueue unseen skills for KG analyze + record co-occurrence (free, no LLM).
 		if (skills.length) {
@@ -403,9 +406,30 @@ export async function getJobs(req, res) {
 
 		let docs;
 		let total;
+		let recommendationFallback = false;
 		const useScorePipeline = needsScorePipeline(sort, hasScoreFilters);
+		const useRecommendation = sort === 'recommended' && applierName;
 
-		if (useScorePipeline) {
+		if (useRecommendation) {
+			const result = await recommendJobsForApplier({
+				applierName,
+				mongoQuery: query,
+				scoreFilters,
+				skip,
+				limit: limitNum,
+			});
+			if (!result.recommendationFallback) {
+				docs = result.docs;
+				total = result.total;
+			} else {
+				recommendationFallback = true;
+				const sortOption = { postedAt: -1, _id: -1 };
+				[docs, total] = await Promise.all([
+					jobsCollection.find(query).sort(sortOption).skip(skip).limit(limitNum).toArray(),
+					jobsCollection.countDocuments(query),
+				]);
+			}
+		} else if (useScorePipeline) {
 			// Aggregation computes the total in its $facet — no separate countDocuments needed.
 			const result = await runJobListAggregation(jobsCollection, query, {
 				sort,
@@ -439,6 +463,7 @@ export async function getJobs(req, res) {
 		return res.json({
 			success: true,
 			data: docs,
+			recommendationFallback,
 			pagination: {
 				total,
 				page: pageNum,

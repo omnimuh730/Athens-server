@@ -6,7 +6,6 @@ import {
 	userResumesCollection,
 } from '../../db/mongo.js';
 import { enqueueSkills } from '../skillEnrichment/queue.js';
-import { invalidatePersonalSkillCache } from '../skillScoreService.js';
 
 export const PROFILE_GRAPH_ID = '__profile__';
 
@@ -154,7 +153,6 @@ export async function mergeSkillsIntoPersonalInfo(skillNames = []) {
 		const doc = await buildPersonalSkillDoc(name);
 		await personalInfoCollection.updateOne({ name: doc.name }, { $set: doc }, { upsert: true });
 	}
-	if (names.length) invalidatePersonalSkillCache();
 }
 
 /** Rebuild aggregate profile graph from all analyzed resumes (max strength per skill). */

@@ -8,12 +8,13 @@
 		"start": "nodemon index.js",
 		"migrate": "node src/db/migration.js",
 		"migrate-passwords": "node src/db/migratePasswords.js",
-		"backfill-skillscore": "node src/scripts/backfillSkillScore.js",
-		"recalculate-skillscore": "node src/scripts/recalculateSkillScore.js",
+		"backfill-job-embeddings": "node src/scripts/backfillJobEmbeddings.js",
+		"backfill-resume-embeddings": "node src/scripts/backfillResumeEmbeddings.js",
 		"reset-skill-graph": "node src/scripts/resetSkillGraph.js"
 	},
 	"dependencies": {
 		"@google/genai": "^1.13.0",
+		"@qdrant/js-client-rest": "^1.18.0",
 		"bcrypt": "^5.1.1",
 		"cheerio": "^1.2.0",
 		"cors": "^2.8.5",

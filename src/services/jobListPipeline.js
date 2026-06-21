@@ -1,6 +1,6 @@
 import { inferJobSource, SOURCE_MAP_VERSION } from '../config/jobSources.js';
 
-/** Weights for list sort/filter aggregation (skill comes from stored `skillScore`). */
+/** Weights for list sort/filter aggregation (skill match is computed per-request for recommended sort). */
 export const SCORE_WEIGHTS = {
 	skill: 0.45,
 	applicant: 0.2,
@@ -23,7 +23,7 @@ function clampScore(value) {
 	return Math.max(0, Math.min(100, Math.round(n)));
 }
 
-function applicantScoreFromJob(job) {
+export function applicantScoreFromJob(job) {
 	const count = job?.applicants?.count ?? job?.applicantCount ?? job?.estimateApplicantNumber;
 	let n = typeof count === 'number' ? count : NaN;
 	if (!Number.isFinite(n)) {
@@ -34,7 +34,7 @@ function applicantScoreFromJob(job) {
 	return clampScore(100 - (Math.min(n, 200) / 200) * 100);
 }
 
-function salaryScoreFromJob(job) {
+export function salaryScoreFromJob(job) {
 	const salary = String(job?.details?.money ?? job?.salary ?? '');
 	const matches = salary.match(/(\d+(?:\.\d+)?)\s*K/gi);
 	if (!matches?.length) return null;
@@ -57,14 +57,13 @@ export function attachStaticScoreFields(job) {
 
 /**
  * Mongo stages: derive score* fields used for filter/sort (freshness from postedAt).
- * Skill uses the stored, precomputed `skillScore` (kept fresh by skillScoreService
- * when personal skills change) — computing it live per request is far too slow.
+ * Skill defaults to neutral 45 when not injected by the recommendation pipeline.
  */
 export function scoreDerivationStages() {
 	return [
 		{
 			$addFields: {
-				scoreSkill: { $ifNull: ['$skillScore', 45] },
+				scoreSkill: 45,
 				scoreSalary: { $cond: [{ $isNumber: '$scoreSalary' }, '$scoreSalary', null] },
 				scoreApplicant: { $ifNull: ['$scoreApplicant', 50] },
 				scoreFreshness: {
@@ -191,7 +190,7 @@ export function needsScorePipeline(sort, hasScoreFilters) {
 export async function runJobListAggregation(jobsCollection, query, { sort, skip, limit, scoreFilters }) {
 	const pipeline = [
 		{ $match: query },
-		{ $project: { skillScore: 1, scoreSalary: 1, scoreApplicant: 1, postedAt: 1, _createdAt: 1 } },
+		{ $project: { scoreSalary: 1, scoreApplicant: 1, postedAt: 1, _createdAt: 1 } },
 		...scoreDerivationStages(),
 	];
 	const scoreFilterStage = buildScoreFilterStage(scoreFilters);

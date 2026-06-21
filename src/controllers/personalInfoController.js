@@ -1,18 +1,9 @@
 
 import { personalInfoCollection, accountInfoCollection, getCloudMirrorStatus } from "../db/mongo.js";
 import { updateAccountInfoById } from "../services/accountInfoStore.js";
-import { invalidatePersonalSkillCache, refreshSkillScoresForSkills } from "../services/skillScoreService.js";
 import { resolvePersonalSkill } from "../services/skillGraph/resolve.js";
 import { normalizeSkillKey } from "../services/skillGraph/normalize.js";
 import { emptyResumeCatalog, validateResumeCatalog } from "../services/resumeCatalogService.js";
-
-/** Recompute stored job skillScores for the affected skills in the background. */
-function refreshScoresInBackground(changedSkills) {
-	if (!changedSkills.length) return;
-	refreshSkillScoresForSkills(changedSkills).catch((err) =>
-		console.error("Failed to refresh job skill scores", err),
-	);
-}
 
 /** Build personal skill document with graph canonicalId. */
 async function buildPersonalSkillDoc(name) {
@@ -47,8 +38,6 @@ export async function addSkill(req, res) {
 		if (!name) return res.status(400).json({ success: false, error: 'Empty skill' });
 		const doc = await buildPersonalSkillDoc(name);
 		await personalInfoCollection.updateOne({ name: doc.name }, { $set: doc }, { upsert: true });
-		invalidatePersonalSkillCache();
-		refreshScoresInBackground([name]);
 		const docs = await personalInfoCollection.find({}).toArray();
 		return res.json({ success: true, skills: docs.map(d => d.name) });
 	} catch (err) {
@@ -65,8 +54,6 @@ export async function deleteSkill(req, res) {
 		const name = skill.trim();
 		if (!name) return res.status(400).json({ success: false, error: 'Empty skill' });
 		await personalInfoCollection.deleteOne({ name });
-		invalidatePersonalSkillCache();
-		refreshScoresInBackground([name]);
 		const docs = await personalInfoCollection.find({}).toArray();
 		return res.json({ success: true, skills: docs.map(d => d.name) });
 	} catch (err) {
@@ -80,7 +67,6 @@ export async function updateSkills(req, res) {
 		if (!personalInfoCollection) return res.status(503).json({ success: false, error: 'Database not ready' });
 		const { skills } = req.body;
 		if (!Array.isArray(skills)) return res.status(400).json({ success: false, error: 'Missing skills array in body' });
-		const oldDocs = await personalInfoCollection.find({}, { projection: { name: 1 } }).toArray();
 		await personalInfoCollection.deleteMany({});
 		if (skills.length) {
 			const docs = [];
@@ -91,15 +77,6 @@ export async function updateSkills(req, res) {
 			}
 			if (docs.length) await personalInfoCollection.insertMany(docs);
 		}
-		invalidatePersonalSkillCache();
-		// Only jobs referencing added/removed skills need their stored skillScore recomputed.
-		const oldNames = new Set(oldDocs.map(d => String(d.name).trim().toLowerCase()).filter(Boolean));
-		const newNames = new Set(skills.map(s => String(s).trim().toLowerCase()).filter(Boolean));
-		const changed = [
-			...skills.filter(s => !oldNames.has(String(s).trim().toLowerCase())),
-			...oldDocs.map(d => d.name).filter(n => !newNames.has(String(n).trim().toLowerCase())),
-		];
-		refreshScoresInBackground(changed);
 		const docs = await personalInfoCollection.find({}).toArray();
 		return res.json({ success: true, skills: docs.map(d => d.name) });
 	} catch (err) {

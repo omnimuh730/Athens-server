@@ -9,6 +9,7 @@ import { initMongo } from "./src/db/mongo.js";
 import { initNeo4j } from "./src/db/neo4j.js";
 import { initSocket } from "./src/socketHub.js";
 import { startJobAnalysisWorker } from "./src/services/jobAnalysis/index.js";
+import { initQdrantCollections } from "./src/services/vectorStore/qdrantClient.js";
 
 import openTabsRoutes from "./src/routes/openTabsRoutes.js";
 import jobRoutes from "./src/routes/jobRoutes.js";
@@ -19,7 +20,6 @@ import reportRoutes from "./src/routes/reportRoutes.js";
 import accountInfoRoutes from "./src/routes/accountInfoRoutes.js";
 import foxRoutes from "./src/routes/foxRoutes.js";
 import ruleRoutes from "./src/routes/ruleRoutes.js";
-import skillScoreRoutes from "./src/routes/skillScoreRoutes.js";
 import vendorMonitorRoutes from "./src/routes/vendorMonitorRoutes.js";
 import mailRoutes from "./src/routes/mailRoutes.js";
 import settingsRoutes from "./src/routes/settingsRoutes.js";
@@ -49,6 +49,11 @@ async function bootstrap() {
 			process.exit(1);
 		}
 	}
+	try {
+		await initQdrantCollections();
+	} catch (err) {
+		console.error('Qdrant init failed — vector recommendations disabled:', err.message);
+	}
 }
 
 bootstrap().catch(err => {
@@ -66,7 +71,6 @@ app.use('/api', reportRoutes);
 app.use('/api', accountInfoRoutes);
 app.use('/api', foxRoutes);
 app.use('/api', ruleRoutes);
-app.use('/api', skillScoreRoutes);
 app.use('/api', vendorMonitorRoutes);
 app.use('/api', mailRoutes);
 app.use('/api', settingsRoutes);

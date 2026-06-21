@@ -8,6 +8,8 @@ import {
   rebuildProfileGraph,
 } from "./userKnowledgeGraph/index.js";
 import { mergeSkillProfiles } from "./resumeSkillMerge.js";
+import { upsertResumeEmbeddingAsync } from "./embeddings/embeddingIngest.js";
+import { invalidateRecommendationCache } from "./recommendation/recommendationService.js";
 
 async function findAccount(applierNameRaw) {
   const name = String(applierNameRaw ?? "").trim();
@@ -128,6 +130,7 @@ export async function analyzeResumeSkills(resumeId, ownerName, { force = false }
       skills: doc.skillProfile,
     });
     const profileGraph = await rebuildProfileGraph(ownerName);
+    upsertResumeEmbeddingAsync(resumeIdStr, ownerName, { applierName: ownerName });
     return {
       alreadyAnalyzed: true,
       skillProfile: doc.skillProfile,
@@ -184,6 +187,9 @@ export async function analyzeResumeSkills(resumeId, ownerName, { force = false }
 
   await mergeSkillsIntoPersonalInfo(skillProfile.map((s) => s.name));
   const profileGraph = await rebuildProfileGraph(ownerName);
+
+  upsertResumeEmbeddingAsync(resumeIdStr, ownerName, { applierName: ownerName });
+  invalidateRecommendationCache(ownerName);
 
   return {
     alreadyAnalyzed: false,
