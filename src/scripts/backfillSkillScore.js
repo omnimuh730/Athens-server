@@ -1,9 +1,15 @@
 import 'dotenv/config';
 import { initMongo, closeMongo, jobsCollection } from '../db/mongo.js';
-import { computeSkillScoreValue } from '../services/skillScoreService.js';
+import { initNeo4j, closeNeo4j } from '../db/neo4j.js';
+import { computeSkillScoreValue, SKILL_SCORE_VERSION } from '../services/skillScoreService.js';
 
 async function backfillSkillScores() {
 	await initMongo();
+	try {
+		await initNeo4j();
+	} catch (err) {
+		console.warn('[backfill] Neo4j unavailable:', err.message);
+	}
 	if (!jobsCollection) {
 		console.error('Jobs collection is not available. Check Mongo configuration.');
 		process.exit(1);
@@ -20,7 +26,7 @@ async function backfillSkillScores() {
 			{
 				$set: {
 					skillScore: score,
-					modelVersion: '1.12.8'
+					skillScoreVersion: SKILL_SCORE_VERSION,
 				}
 			}
 		);
@@ -31,6 +37,7 @@ async function backfillSkillScores() {
 	}
 
 	console.log(`Backfill completed. Updated ${processed} job documents.`);
+	await closeNeo4j().catch(() => {});
 	await closeMongo();
 }
 

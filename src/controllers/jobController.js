@@ -3,13 +3,13 @@ import {
 	jobsCollection,
 	personalInfoCollection,
 	companyCategoryCollection,
-	skillsCategoryCollection,
 	accountInfoCollection,
 	rulesCollection
 } from "../db/mongo.js";
 import { JobSourceTitles } from '../../../configs/pub.js';
 import { isJobBlocked, buildMongoQueryForRule, isMatchNoneQuery } from '../utils/ruleMatcher.js';
-import { computeSkillScoreValue, getMissingSkills, refreshSkillScoresForSkills } from '../services/skillScoreService.js';
+import { computeSkillScoreValue, refreshSkillScoresForSkills, SKILL_SCORE_VERSION } from '../services/skillScoreService.js';
+import { ingestJobSkills } from '../services/skillEnrichment/worker.js';
 import { buildMongoCaseInsensitiveRegexFilter, buildSafeRegExp } from '../utils/safeRegex.js';
 import { attachStaticScoreFields, needsScorePipeline, runJobListAggregation } from '../services/jobListPipeline.js';
 
@@ -126,7 +126,6 @@ export async function createJob(req, res) {
 		job.companyLink = typeof job.companyLink === 'string' ? job.companyLink.trim() : '';
 
 		const skills = Array.isArray(job.skills) ? job.skills.map(s => String(s).trim()).filter(Boolean) : [];
-		let missingSkills = [];
 		try {
 			const companyTags = Array.isArray(job.company?.tags) ? job.company.tags.map(t => String(t).trim()).filter(Boolean) : [];
 			if (companyCategoryCollection && companyTags.length) {
@@ -140,31 +139,21 @@ export async function createJob(req, res) {
 				await companyCategoryCollection.bulkWrite(ops, { ordered: false });
 			}
 
-			if (skillsCategoryCollection && skills.length) {
-				missingSkills = await getMissingSkills(skills);
-				if (missingSkills.length) {
-					const nowIso = new Date().toISOString();
-					const ops = missingSkills.map(skill => ({
-						updateOne: {
-							filter: { name: skill },
-							update: { $setOnInsert: { name: skill, createdAt: nowIso } },
-							upsert: true,
-						}
-					}));
-					await skillsCategoryCollection.bulkWrite(ops, { ordered: false });
-				}
+			if (skills.length) {
+				await ingestJobSkills(skills);
 			}
 		} catch (e) {
-			console.warn('Failed to upsert categories', e);
+			console.warn('Failed to ingest job skills into graph pipeline', e);
 		}
 
 		job.skillScore = await computeSkillScoreValue(skills);
+		job.skillScoreVersion = SKILL_SCORE_VERSION;
 		Object.assign(job, attachStaticScoreFields({ ...job, skills }));
 
 		const result = jobsCollection ? await jobsCollection.insertOne(job) : null;
 
-		if (missingSkills.length) {
-			refreshSkillScoresForSkills(missingSkills).catch(err => console.error('Failed to refresh skill scores', err));
+		if (skills.length) {
+			refreshSkillScoresForSkills(skills).catch(err => console.error('Failed to refresh skill scores', err));
 		}
 
 		return res.status(201).json({ success: true, created: true, insertedId: result ? result.insertedId : null });

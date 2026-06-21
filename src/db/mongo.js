@@ -6,7 +6,6 @@ let mongoClient;
 let mongoCloudClient;
 let jobsCollection;
 let companyCategoryCollection;
-let skillsCategoryCollection;
 let personalInfoCollection;
 let accountInfoCollection;
 /** Cloud mirror of `account_info` — writes/deletes are applied here too when configured. */
@@ -17,10 +16,27 @@ let rulesCollection;
 let bidRecordsCollection;
 let bidRecordsLocalCollection;
 let bidRecordsCloudCollection;
+let skillEnrichmentQueueCollection;
+let skillCooccurrenceCollection;
 // Resume generator: saved config per applier + a history of generation runs.
 // Always local (AIMS_local) — this is the user's working data.
 let resumeGeneratorConfigCollection;
 let resumeGenerationsCollection;
+
+async function ensureSkillCollectionsIndexes() {
+	if (skillEnrichmentQueueCollection) {
+		await skillEnrichmentQueueCollection.createIndex({ normalizedKey: 1 }, { unique: true });
+		await skillEnrichmentQueueCollection.createIndex({ status: 1, createdAt: 1 });
+	}
+	if (skillCooccurrenceCollection) {
+		await skillCooccurrenceCollection.createIndex({ pairKey: 1 }, { unique: true });
+		await skillCooccurrenceCollection.createIndex({ count: -1 });
+	}
+	if (personalInfoCollection) {
+		await personalInfoCollection.createIndex({ name: 1 }, { unique: true });
+		await personalInfoCollection.createIndex({ canonicalId: 1 });
+	}
+}
 
 async function initMongo() {
 	const mongoUrl = process.env.MONGO_URL;
@@ -35,13 +51,15 @@ async function initMongo() {
 	const db = mongoClient.db(mongoDbName);
 	jobsCollection = db.collection('job_market');
 	companyCategoryCollection = db.collection('company_category');
-	skillsCategoryCollection = db.collection('skills_category');
 	personalInfoCollection = db.collection('personal_info');
+	skillEnrichmentQueueCollection = db.collection('skill_enrichment_queue');
+	skillCooccurrenceCollection = db.collection('skill_cooccurrence');
 	accountInfoCollection = db.collection('account_info');
 	rulesCollection = db.collection('rules');
 	resumeGeneratorConfigCollection = db.collection('resume_generator_config');
 	resumeGenerationsCollection = db.collection('resume_generations');
 	await ensureJobMarketIndexes(jobsCollection);
+	await ensureSkillCollectionsIndexes();
 	void backfillMissingJobScoreFields(jobsCollection).catch((err) => {
 		console.warn('[job_market] score field backfill failed', err.message);
 	});
@@ -135,8 +153,9 @@ export {
 	initMongo,
 	jobsCollection,
 	companyCategoryCollection,
-	skillsCategoryCollection,
 	personalInfoCollection,
+	skillEnrichmentQueueCollection,
+	skillCooccurrenceCollection,
 	accountInfoCollection,
 	accountInfoCloudCollection,
 	isCloudMirrorConfigured,

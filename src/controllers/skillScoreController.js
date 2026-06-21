@@ -1,11 +1,11 @@
-import { jobsCollection, skillsCategoryCollection } from '../db/mongo.js';
-import { recalculateSkillScores } from '../scripts/recalculateSkillScore.js';
+import { jobsCollection } from '../db/mongo.js';
+import { recalculateAllSkillScores } from '../services/graphSkillScoreService.js';
 
 let runningRecalc = null;
 
 export async function recalculateSkillScore(req, res) {
 	try {
-		if (!jobsCollection || !skillsCategoryCollection) {
+		if (!jobsCollection) {
 			return res.status(503).json({ success: false, error: 'Database not ready' });
 		}
 
@@ -13,7 +13,7 @@ export async function recalculateSkillScore(req, res) {
 			return res.status(409).json({ success: false, error: 'Skill score recalculation is already running' });
 		}
 
-		runningRecalc = recalculateSkillScores({ ensureMongo: false, closeMongoWhenDone: false });
+		runningRecalc = recalculateAllSkillScores();
 		const result = await runningRecalc;
 
 		return res.json({
@@ -28,4 +28,3 @@ export async function recalculateSkillScore(req, res) {
 		runningRecalc = null;
 	}
 }
-

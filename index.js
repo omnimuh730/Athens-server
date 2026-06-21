@@ -6,12 +6,15 @@ import express from "express";
 import cors from 'cors';
 
 import { initMongo } from "./src/db/mongo.js";
+import { initNeo4j } from "./src/db/neo4j.js";
 import { initSocket } from "./src/socketHub.js";
+import { startEnrichmentWorker } from "./src/services/skillEnrichment/worker.js";
 
 import openTabsRoutes from "./src/routes/openTabsRoutes.js";
 import jobRoutes from "./src/routes/jobRoutes.js";
 import personalInfoRoutes from "./src/routes/personalInfoRoutes.js";
 import skillCategoryRoutes from "./src/routes/skillCategoryRoutes.js";
+import skillGraphRoutes from "./src/routes/skillGraphRoutes.js";
 import reportRoutes from "./src/routes/reportRoutes.js";
 import accountInfoRoutes from "./src/routes/accountInfoRoutes.js";
 import foxRoutes from "./src/routes/foxRoutes.js";
@@ -33,8 +36,21 @@ const host = process.env.HOST !== undefined && process.env.HOST !== "" ? process
 app.use(express.json({ limit: '50mb' }));
 app.use(cors({ origin: '*' }));
 
-initMongo().catch(err => {
-	console.error('Failed to connect to MongoDB', err);
+async function bootstrap() {
+	await initMongo();
+	try {
+		await initNeo4j();
+		startEnrichmentWorker();
+	} catch (err) {
+		console.error('Neo4j connection failed — skill graph enrichment disabled until fixed:', err.message);
+		if (process.env.NEO4J_REQUIRED === 'true') {
+			process.exit(1);
+		}
+	}
+}
+
+bootstrap().catch(err => {
+	console.error('Failed to start server', err);
 	process.exit(1);
 });
 
@@ -43,6 +59,7 @@ app.use('/api', openTabsRoutes);
 app.use('/api', jobRoutes);
 app.use('/api', personalInfoRoutes);
 app.use('/api', skillCategoryRoutes);
+app.use('/api', skillGraphRoutes);
 app.use('/api', reportRoutes);
 app.use('/api', accountInfoRoutes);
 app.use('/api', foxRoutes);

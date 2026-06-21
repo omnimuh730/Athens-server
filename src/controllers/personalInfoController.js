@@ -2,6 +2,8 @@
 import { personalInfoCollection, accountInfoCollection, getCloudMirrorStatus } from "../db/mongo.js";
 import { updateAccountInfoById } from "../services/accountInfoStore.js";
 import { invalidatePersonalSkillCache, refreshSkillScoresForSkills } from "../services/skillScoreService.js";
+import { resolvePersonalSkill } from "../services/skillGraph/resolve.js";
+import { normalizeSkillKey } from "../services/skillGraph/normalize.js";
 import { emptyResumeCatalog, validateResumeCatalog } from "../services/resumeCatalogService.js";
 
 /** Recompute stored job skillScores for the affected skills in the background. */
@@ -12,12 +14,24 @@ function refreshScoresInBackground(changedSkills) {
 	);
 }
 
+/** Build personal skill document with graph canonicalId. */
+async function buildPersonalSkillDoc(name) {
+	const resolved = await resolvePersonalSkill(name);
+	return {
+		name: resolved.raw || name.trim(),
+		normalizedKey: resolved.normalizedKey || normalizeSkillKey(name),
+		canonicalId: resolved.canonicalId || null,
+		createdAt: new Date().toISOString(),
+	};
+}
+
 export async function getSkills(req, res) {
 	try {
 		if (!personalInfoCollection) return res.status(503).json({ success: false, error: 'Database not ready' });
 		const docs = await personalInfoCollection.find({}).toArray();
 		const skills = docs.map(d => d.name);
-		return res.json({ success: true, skills });
+		const canonicalIds = docs.map(d => d.canonicalId).filter(Boolean);
+		return res.json({ success: true, skills, canonicalIds });
 	} catch (err) {
 		console.error('GET /api/personal/skills error', err);
 		return res.status(500).json({ success: false, error: err.message });
@@ -31,7 +45,8 @@ export async function addSkill(req, res) {
 		if (!skill || typeof skill !== 'string') return res.status(400).json({ success: false, error: 'Missing skill string in body' });
 		const name = skill.trim();
 		if (!name) return res.status(400).json({ success: false, error: 'Empty skill' });
-		await personalInfoCollection.updateOne({ name }, { $setOnInsert: { name, createdAt: new Date().toISOString() } }, { upsert: true });
+		const doc = await buildPersonalSkillDoc(name);
+		await personalInfoCollection.updateOne({ name: doc.name }, { $set: doc }, { upsert: true });
 		invalidatePersonalSkillCache();
 		refreshScoresInBackground([name]);
 		const docs = await personalInfoCollection.find({}).toArray();
@@ -68,7 +83,13 @@ export async function updateSkills(req, res) {
 		const oldDocs = await personalInfoCollection.find({}, { projection: { name: 1 } }).toArray();
 		await personalInfoCollection.deleteMany({});
 		if (skills.length) {
-			await personalInfoCollection.insertMany(skills.map(name => ({ name, createdAt: new Date().toISOString() })));
+			const docs = [];
+			for (const name of skills) {
+				const trimmed = String(name).trim();
+				if (!trimmed) continue;
+				docs.push(await buildPersonalSkillDoc(trimmed));
+			}
+			if (docs.length) await personalInfoCollection.insertMany(docs);
 		}
 		invalidatePersonalSkillCache();
 		// Only jobs referencing added/removed skills need their stored skillScore recomputed.
