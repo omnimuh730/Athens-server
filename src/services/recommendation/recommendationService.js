@@ -119,11 +119,12 @@ async function scoreCandidates(candidateMap, applierName) {
 		}
 	}).filter(Boolean);
 
-	if (!jobIds.length || !jobsCollection) return [];
+	if (!jobIds.length || !jobsCollection) return { scored: [], poolIds: new Set() };
 
 	const jobs = await jobsCollection.find({ _id: { $in: jobIds } }).toArray();
 	const jobById = new Map(jobs.map((j) => [String(j._id), j]));
 	const graphCache = new Map();
+	const poolIds = new Set(sorted.map(([id]) => id));
 
 	const scored = [];
 	for (const [jobId, matchInfo] of sorted) {
@@ -155,10 +156,77 @@ async function scoreCandidates(candidateMap, applierName) {
 			...scores,
 			bestResumeId: matchInfo.bestResumeId,
 			bestResumeTechStack: matchInfo.bestResumeTechStack,
+			recommendationRanked: true,
 		});
 	}
 
-	return scored.sort((a, b) => b.scoreOverall - a.scoreOverall || String(b.postedAt).localeCompare(String(a.postedAt)));
+	scored.sort((a, b) => b.scoreOverall - a.scoreOverall || String(b.postedAt).localeCompare(String(a.postedAt)));
+	return { scored, poolIds };
+}
+
+function poolIdsToObjectIds(poolIds) {
+	const ids = [];
+	for (const id of poolIds) {
+		try {
+			ids.push(new ObjectId(id));
+		} catch {
+			/* skip invalid */
+		}
+	}
+	return ids;
+}
+
+/** Jobs outside the vector pool — secondary scores only, sorted by posted date. */
+async function fetchTailJobs(mongoQuery, poolIds, skip, limit) {
+	if (!jobsCollection || limit <= 0) return [];
+
+	const excludeIds = poolIdsToObjectIds(poolIds);
+	const query = excludeIds.length
+		? { $and: [mongoQuery, { _id: { $nin: excludeIds } }] }
+		: mongoQuery;
+
+	const jobs = await jobsCollection
+		.find(query)
+		.sort({ postedAt: -1, _id: -1 })
+		.skip(skip)
+		.limit(limit)
+		.toArray();
+
+	return jobs.map((job) => ({
+		...job,
+		...composeJobScores(job, { vectorScore: 0, graphBoost: 0 }),
+		bestResumeId: null,
+		bestResumeTechStack: null,
+		recommendationRanked: false,
+	}));
+}
+
+async function paginateRecommendation(cached, skip, limit, scoreFilters) {
+	const ranked = applyScoreFilters(cached.ranked, scoreFilters);
+	const rankedLen = ranked.length;
+	const tailTotal = Math.max(0, cached.catalogTotal - cached.poolIds.size);
+	const total = rankedLen + tailTotal;
+
+	if (skip + limit <= rankedLen) {
+		return { docs: ranked.slice(skip, skip + limit), total, catalogTotal: cached.catalogTotal, recommendationFallback: false };
+	}
+
+	if (skip >= rankedLen) {
+		const tailSkip = skip - rankedLen;
+		const tail = await fetchTailJobs(cached.mongoQuery, cached.poolIds, tailSkip, limit);
+		const tailFiltered = applyScoreFilters(tail, scoreFilters);
+		return { docs: tailFiltered, total, catalogTotal: cached.catalogTotal, recommendationFallback: false };
+	}
+
+	const fromRanked = ranked.slice(skip);
+	const tail = await fetchTailJobs(cached.mongoQuery, cached.poolIds, 0, limit - fromRanked.length);
+	const tailFiltered = applyScoreFilters(tail, scoreFilters);
+	return {
+		docs: [...fromRanked, ...tailFiltered],
+		total,
+		catalogTotal: cached.catalogTotal,
+		recommendationFallback: false,
+	};
 }
 
 /**
@@ -189,9 +257,7 @@ export async function recommendJobsForApplier({
 	const ck = cacheKey(name, qHash);
 	const cached = scoreCache.get(ck);
 	if (cached && cached.expiresAt > Date.now()) {
-		const filtered = applyScoreFilters(cached.scored, scoreFilters);
-		const page = filtered.slice(skip, skip + limit);
-		return { docs: page, total: filtered.length, recommendationFallback: false };
+		return paginateRecommendation(cached, skip, limit, scoreFilters);
 	}
 
 	const resumeVectors = await buildResumeVectorEntries(resumes, name);
@@ -204,25 +270,35 @@ export async function recommendJobsForApplier({
 		return { docs: [], total: 0, recommendationFallback: true, reason: 'no_candidates' };
 	}
 
-	let scored = await scoreCandidates(candidateMap, name);
+	const { scored: rankedRaw, poolIds } = await scoreCandidates(candidateMap, name);
 
+	let ranked = rankedRaw;
 	if (mongoQuery && jobsCollection) {
 		const matchingIds = new Set(
 			(await jobsCollection.find(mongoQuery, { projection: { _id: 1 } }).toArray())
 				.map((d) => String(d._id)),
 		);
-		scored = scored.filter((j) => matchingIds.has(String(j._id)));
+		ranked = ranked.filter((j) => matchingIds.has(String(j._id)));
+		// Drop pool ids that no longer match filters
+		for (const id of poolIds) {
+			if (!matchingIds.has(id)) poolIds.delete(id);
+		}
 	}
 
-	scored = applyScoreFilters(scored, scoreFilters);
-	scoreCache.set(ck, { scored, expiresAt: Date.now() + CACHE_TTL_MS });
+	const catalogTotal = mongoQuery && jobsCollection
+		? await jobsCollection.countDocuments(mongoQuery)
+		: ranked.length;
 
-	const page = scored.slice(skip, skip + limit);
-	return {
-		docs: page,
-		total: scored.length,
-		recommendationFallback: false,
+	const cacheEntry = {
+		ranked,
+		poolIds,
+		mongoQuery: mongoQuery || {},
+		catalogTotal,
+		expiresAt: Date.now() + CACHE_TTL_MS,
 	};
+	scoreCache.set(ck, cacheEntry);
+
+	return paginateRecommendation(cacheEntry, skip, limit, scoreFilters);
 }
 
 export function invalidateRecommendationCache(applierName) {

@@ -408,6 +408,7 @@ export async function getJobs(req, res) {
 		let total;
 		let recommendationFallback = false;
 		let recommendationReason = null;
+		let catalogTotal = null;
 		const useScorePipeline = needsScorePipeline(sort, hasScoreFilters);
 		const useRecommendation = sort === 'recommended' && applierName;
 
@@ -422,6 +423,7 @@ export async function getJobs(req, res) {
 			if (!result.recommendationFallback) {
 				docs = result.docs;
 				total = result.total;
+				catalogTotal = result.catalogTotal ?? total;
 			} else {
 				recommendationFallback = true;
 				recommendationReason = result.reason || 'unknown';
@@ -467,6 +469,7 @@ export async function getJobs(req, res) {
 			data: docs,
 			recommendationFallback,
 			recommendationReason,
+			catalogTotal,
 			pagination: {
 				total,
 				page: pageNum,
