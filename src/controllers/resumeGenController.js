@@ -1,5 +1,6 @@
 import { ObjectId } from "mongodb";
 import { accountInfoCollection, resumeGeneratorConfigCollection, resumeGenerationsCollection } from "../db/mongo.js";
+import { syncGeneratedResumeAfterRun } from "../services/generatedResumeService.js";
 import {
   PROVIDERS,
   getProvider,
@@ -209,10 +210,14 @@ async function runGeneration({ providerId, apiKey, model, steps, systemInstructi
 // Persist a finished (or failed) run to the local resume_generations history.
 async function saveGenerationRun(doc) {
   try {
-    if (resumeGenerationsCollection) await resumeGenerationsCollection.insertOne(doc);
+    if (resumeGenerationsCollection) {
+      const result = await resumeGenerationsCollection.insertOne(doc);
+      return result.insertedId;
+    }
   } catch (err) {
     console.warn("[resume_generations] insert failed:", err.message);
   }
+  return null;
 }
 
 function configSnapshot(body) {
@@ -241,7 +246,7 @@ export async function generateResume(req, res) {
   const startedAt = new Date();
   try {
     const result = await runGeneration({ ...prep, systemInstruction: body.systemInstruction, identity: body.identity, applierName: body.applierName, jobDescription: body.jobDescription, reasoningEffort: body.reasoningEffort });
-    await saveGenerationRun({
+    const generationId = await saveGenerationRun({
       applierName: cleanString(body.applierName) || null,
       provider: prep.providerId,
       model: prep.model,
@@ -255,6 +260,18 @@ export async function generateResume(req, res) {
       startedAt,
       finishedAt: new Date(),
     });
+    try {
+      await syncGeneratedResumeAfterRun({
+        generationId,
+        ownerName: cleanString(body.applierName),
+        sections: result.sections,
+        identity: body.identity,
+        jobDescription: cleanString(body.jobDescription),
+        templateId: body.templateId ?? null,
+      });
+    } catch (syncErr) {
+      console.warn("[resume-generate] library sync failed:", syncErr.message);
+    }
     return res.json({ success: true, provider: prep.providerId, model: prep.model, ...result });
   } catch (err) {
     const status = Number.isInteger(err?.status) ? err.status : 500;
@@ -305,7 +322,7 @@ export async function generateResumeStream(req, res) {
       { ...prep, systemInstruction: body.systemInstruction, identity: body.identity, applierName: body.applierName, jobDescription: body.jobDescription, reasoningEffort: body.reasoningEffort },
       (evt) => send("step", evt),
     );
-    await saveGenerationRun({
+    const generationId = await saveGenerationRun({
       applierName: cleanString(body.applierName) || null,
       provider: prep.providerId,
       model: prep.model,
@@ -319,6 +336,18 @@ export async function generateResumeStream(req, res) {
       startedAt,
       finishedAt: new Date(),
     });
+    try {
+      await syncGeneratedResumeAfterRun({
+        generationId,
+        ownerName: cleanString(body.applierName),
+        sections: result.sections,
+        identity: body.identity,
+        jobDescription: cleanString(body.jobDescription),
+        templateId: body.templateId ?? null,
+      });
+    } catch (syncErr) {
+      console.warn("[resume-generate/stream] library sync failed:", syncErr.message);
+    }
     send("done", { provider: prep.providerId, model: prep.model, sections: result.sections, usage: result.usage });
   } catch (err) {
     const status = Number.isInteger(err?.status) ? err.status : 500;

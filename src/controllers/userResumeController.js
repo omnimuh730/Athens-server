@@ -14,7 +14,8 @@ export async function listUserResumesHandler(req, res) {
     if (!ownerName) {
       return res.status(400).json({ success: false, error: "ownerName is required" });
     }
-    const resumes = await listUserResumes(ownerName);
+    const source = String(req.query?.source ?? "").trim() || undefined;
+    const resumes = await listUserResumes(ownerName, { source });
     return res.json({ success: true, resumes });
   } catch (err) {
     console.error("GET /api/personal/user-resumes error", err);

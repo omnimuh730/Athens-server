@@ -29,6 +29,9 @@ function toSummary(doc) {
     sizeBytes: doc.sizeBytes ?? 0,
     extractedText: doc.extractedText ? doc.extractedText.slice(0, 500) : "",
     isPrimary: Boolean(doc.isPrimary),
+    source: doc.source === "generated" ? "generated" : "uploaded",
+    generationId: doc.generationId ? String(doc.generationId) : undefined,
+    templateId: doc.templateId ?? undefined,
     analyzed: Boolean(doc.analyzed),
     analyzedAt: doc.analyzedAt || null,
     skillCount: skillProfile.length,
@@ -126,13 +129,20 @@ function parseOwnerId(raw) {
   }
 }
 
-export async function listUserResumes(ownerName) {
+export async function listUserResumes(ownerName, { source } = {}) {
   if (!userResumesCollection) throw new Error("Database not ready");
   const name = cleanString(ownerName);
   if (!name) throw new Error("ownerName is required");
 
+  const filter = { ownerName: name };
+  if (source === "uploaded") {
+    filter.$or = [{ source: { $exists: false } }, { source: "uploaded" }];
+  } else if (source === "generated") {
+    filter.source = "generated";
+  }
+
   const docs = await userResumesCollection
-    .find({ ownerName: name })
+    .find(filter)
     .sort({ isPrimary: -1, uploadedAt: -1 })
     .toArray();
 

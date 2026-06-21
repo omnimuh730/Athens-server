@@ -24,6 +24,7 @@ import ruleRoutes from "./src/routes/ruleRoutes.js";
 import vendorMonitorRoutes from "./src/routes/vendorMonitorRoutes.js";
 import mailRoutes from "./src/routes/mailRoutes.js";
 import settingsRoutes from "./src/routes/settingsRoutes.js";
+import agentRoutes from "./src/routes/agentRoutes.js";
 import {
 	getAutoBidProfile,
 	upsertAutoBidProfile,
@@ -81,6 +82,7 @@ app.use('/api', ruleRoutes);
 app.use('/api', vendorMonitorRoutes);
 app.use('/api', mailRoutes);
 app.use('/api', settingsRoutes);
+app.use('/api/agents', agentRoutes);
 
 // Aliases without `/api` (reverse proxies that strip `/api` before forwarding to Node).
 app.get("/personal/auto-bid-profile", getAutoBidProfile);

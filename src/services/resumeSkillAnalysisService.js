@@ -122,6 +122,24 @@ export async function analyzeResumeSkills(resumeId, ownerName, { force = false }
   const doc = await loadResumeDoc(resumeId, ownerName);
   const resumeIdStr = String(doc._id);
 
+  if (doc.source === "generated" && doc.analyzed && Array.isArray(doc.skillProfile) && doc.skillProfile.length) {
+    const graph = await buildUserGraphFromResume({
+      applierName: ownerName,
+      resumeId: resumeIdStr,
+      resumeName: doc.fileName,
+      skills: doc.skillProfile,
+    });
+    const profileGraph = await rebuildProfileGraph(ownerName);
+    return {
+      alreadyAnalyzed: true,
+      skillProfile: doc.skillProfile,
+      graph,
+      profileGraph,
+      usage: null,
+      fromGeneration: true,
+    };
+  }
+
   if (doc.analyzed && !force && Array.isArray(doc.skillProfile) && doc.skillProfile.length) {
     const graph = await buildUserGraphFromResume({
       applierName: ownerName,
