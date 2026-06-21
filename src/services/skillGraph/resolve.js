@@ -1,4 +1,4 @@
-import { runRead } from '../../db/neo4j.js';
+import { runReadBatch, toNeo4jInt } from '../../db/neo4j.js';
 import { normalizeSkillKey, normalizeSurfaceForm, toComparable } from './normalize.js';
 import { findExactMatch } from './search.js';
 import { linkAlias, createSkillWithAlias } from './apply.js';
@@ -55,25 +55,27 @@ export async function resolvePersonalSkill(name) {
 
 /** List skills from graph for API (paginated). */
 export async function listGraphSkills({ q = '', skip = 0, limit = 30 } = {}) {
-	const records = await runRead(
-		`
-		MATCH (s:Skill)
-		WHERE $q = '' OR toLower(s.label) CONTAINS toLower($q) OR toLower(s.id) CONTAINS toLower($q)
-		RETURN s.id AS id, s.label AS label, s.category AS category, s.skillType AS skillType
-		ORDER BY s.label
-		SKIP $skip LIMIT $limit
-		`,
-		{ q: q.trim(), skip: Number(skip), limit: Number(limit) },
-	);
-
-	const countRecords = await runRead(
-		`
-		MATCH (s:Skill)
-		WHERE $q = '' OR toLower(s.label) CONTAINS toLower($q) OR toLower(s.id) CONTAINS toLower($q)
-		RETURN count(s) AS total
-		`,
-		{ q: q.trim() },
-	);
+	const trimmed = q.trim();
+	const [records, countRecords] = await runReadBatch([
+		{
+			cypher: `
+				MATCH (s:Skill)
+				WHERE $q = '' OR toLower(s.label) CONTAINS toLower($q) OR toLower(s.id) CONTAINS toLower($q)
+				RETURN s.id AS id, s.label AS label, s.category AS category, s.skillType AS skillType
+				ORDER BY s.label
+				SKIP $skip LIMIT $limit
+			`,
+			params: { q: trimmed, skip: toNeo4jInt(skip), limit: toNeo4jInt(limit) },
+		},
+		{
+			cypher: `
+				MATCH (s:Skill)
+				WHERE $q = '' OR toLower(s.label) CONTAINS toLower($q) OR toLower(s.id) CONTAINS toLower($q)
+				RETURN count(s) AS total
+			`,
+			params: { q: trimmed },
+		},
+	]);
 
 	const skills = records.map(r => ({
 		id: r.get('id'),

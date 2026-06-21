@@ -43,6 +43,43 @@ export async function findExactMatch(normalizedKey) {
 }
 
 /**
+ * Batch exact lookup for many normalized keys in one Neo4j round trip.
+ * Returns Map normalizedKey -> match result (or null if not found).
+ */
+export async function findExactMatches(normalizedKeys = []) {
+	const keys = [...new Set(normalizedKeys.filter(Boolean))];
+	const map = new Map(keys.map(k => [k, null]));
+	if (!keys.length) return map;
+
+	const records = await runRead(
+		`
+		UNWIND $keys AS key
+		OPTIONAL MATCH (a:RawAlias { normalizedKey: key })-[:ALIAS_OF]->(s1:Skill)
+		OPTIONAL MATCH (s2:Skill { id: key })
+		WITH key, coalesce(s1, s2) AS skill
+		WHERE skill IS NOT NULL
+		RETURN key AS normalizedKey, skill.id AS id, skill.label AS label,
+		       skill.category AS category, skill.skillType AS skillType
+		`,
+		{ keys },
+	);
+
+	for (const r of records) {
+		const key = r.get('normalizedKey');
+		map.set(key, {
+			id: r.get('id'),
+			label: r.get('label'),
+			category: r.get('category'),
+			skillType: r.get('skillType'),
+			matchType: 'exact',
+			score: 1,
+		});
+	}
+
+	return map;
+}
+
+/**
  * Search graph for candidate Skill nodes using keywords + fuzzy on raw key.
  * Returns top `limit` deduped candidates sorted by score.
  */

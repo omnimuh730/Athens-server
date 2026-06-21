@@ -39,6 +39,22 @@ export async function runRead(cypher, params = {}) {
 	}
 }
 
+/** Run multiple read queries in a single session (avoids open/close per query). */
+export async function runReadBatch(queries) {
+	if (!driver) throw new Error('Neo4j not initialized');
+	const session = driver.session({ defaultAccessMode: neo4j.session.READ });
+	try {
+		const results = [];
+		for (const { cypher, params = {} } of queries) {
+			const result = await session.run(cypher, params);
+			results.push(result.records);
+		}
+		return results;
+	} finally {
+		await session.close();
+	}
+}
+
 export async function runWrite(cypher, params = {}) {
 	if (!driver) throw new Error('Neo4j not initialized');
 	const session = driver.session({ defaultAccessMode: neo4j.session.WRITE });
@@ -65,4 +81,9 @@ async function ensureGraphSchema() {
 
 export function isNeo4jReady() {
 	return Boolean(driver);
+}
+
+/** Neo4j SKIP/LIMIT require integer types — plain JS numbers can fail as 0.0. */
+export function toNeo4jInt(n) {
+	return neo4j.int(Math.max(0, Math.floor(Number(n) || 0)));
 }

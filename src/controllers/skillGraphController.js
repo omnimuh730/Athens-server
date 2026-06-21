@@ -53,9 +53,13 @@ export async function getWorldGraphHandler(req, res) {
 		if (!isNeo4jReady()) return res.status(503).json({ success: false, error: 'Neo4j not ready' });
 		const nodeLimit = Number(req.query.nodeLimit) || 2000;
 		const edgeLimit = Number(req.query.edgeLimit) || 5000;
+		const includeQueueStats = req.query.includeQueueStats === 'true';
 		const graph = await fetchWorldGraph({ nodeLimit, edgeLimit });
-		const stats = await countQueueStats();
-		return res.json({ success: true, graph, queueStats: stats });
+		const payload = { success: true, graph };
+		if (includeQueueStats) {
+			payload.queueStats = await countQueueStats();
+		}
+		return res.json(payload);
 	} catch (err) {
 		console.error('GET /api/skills/graph/world error', err);
 		return res.status(500).json({ success: false, error: err.message });

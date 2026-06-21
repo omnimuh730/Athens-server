@@ -6,43 +6,18 @@ import {
 	accountInfoCollection,
 	rulesCollection
 } from "../db/mongo.js";
-import { JobSourceTitles } from '../config/jobSources.js';
 import { isJobBlocked, buildMongoQueryForRule, isMatchNoneQuery } from '../utils/ruleMatcher.js';
-import { buildMongoCaseInsensitiveRegexFilter, buildSafeRegExp } from '../utils/safeRegex.js';
 import { attachStaticScoreFields, needsScorePipeline, runJobListAggregation } from '../services/jobListPipeline.js';
+import {
+	buildJobsListQuery,
+	STATUS_TABS,
+	JOB_LIST_PROJECTION,
+} from '../services/jobListQuery.js';
 import { queueJobAnalysis, getJobAnalysisStatus } from '../services/jobAnalysis/index.js';
 import { enqueueSkills } from '../services/skillEnrichment/queue.js';
 import { recordCooccurrenceForJob } from '../services/skillCooccurrence/index.js';
 import { recommendJobsForApplier } from '../services/recommendation/recommendationService.js';
 import { upsertJobEmbeddingAsync } from '../services/embeddings/embeddingIngest.js';
-
-const SCORE_DIMENSIONS = {
-	overall: 'overallScore',
-	skill: 'skillMatch',
-	salary: 'salaryScore',
-	bidEst: 'applicantScore',
-	freshness: 'postedDateScore',
-};
-
-function parseScoreBound(value) {
-	if (value === undefined || value === null || value === '') return null;
-	const n = Number(value);
-	if (!Number.isFinite(n)) return null;
-	return Math.max(0, Math.min(100, Math.round(n)));
-}
-
-function extractScoreFilters(body) {
-	const result = {};
-	for (const [dim, scoreKey] of Object.entries(SCORE_DIMENSIONS)) {
-		const cap = dim.charAt(0).toUpperCase() + dim.slice(1);
-		const min = parseScoreBound(body[`score${cap}Min`]);
-		const max = parseScoreBound(body[`score${cap}Max`]);
-		if (min !== null || max !== null) {
-			result[scoreKey] = { min, max };
-		}
-	}
-	return result;
-}
 
 const DUPLICATE_LOOKBACK_DAYS = 30;
 const LOOKBACK_WINDOW_MS = DUPLICATE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
@@ -242,6 +217,31 @@ export async function removeJobsForRule(req, res) {
 	}
 }
 
+/** Cheap count-only path — skips recommendation and aggregation. */
+export async function getJobStatusCounts(req, res) {
+	try {
+		if (!jobsCollection) {
+			return res.status(503).json({ success: false, error: 'Database not ready' });
+		}
+
+		const entries = await Promise.all(
+			STATUS_TABS.map(async (tab) => {
+				const { query } = await buildJobsListQuery(req.body, { statusTab: tab });
+				const total = await jobsCollection.countDocuments(query);
+				return [tab, total];
+			}),
+		);
+
+		return res.json({
+			success: true,
+			counts: Object.fromEntries(entries),
+		});
+	} catch (err) {
+		console.error('POST /api/jobs/list/counts error', err);
+		return res.status(500).json({ success: false, error: err.message });
+	}
+}
+
 export async function getJobs(req, res) {
 	try {
 		if (!jobsCollection) {
@@ -249,153 +249,15 @@ export async function getJobs(req, res) {
 		}
 
 		const {
-			q,
 			sort,
 			page = 1,
 			limit = 10,
 			skip: skipRaw,
-			scoreOverallMin,
-			scoreOverallMax,
-			scoreSkillMin,
-			scoreSkillMax,
-			scoreSalaryMin,
-			scoreSalaryMax,
-			scoreBidEstMin,
-			scoreBidEstMax,
-			scoreFreshnessMin,
-			scoreFreshnessMax,
-			showLinkedInOnly = 'true',
-			postedAtFrom,
-			jobSources,
-			postedAtTo,
-			applied,
-			status,
 			applierName,
-			...filters
+			countsOnly,
 		} = req.body;
 
-		const scoreFilters = extractScoreFilters({
-			scoreOverallMin,
-			scoreOverallMax,
-			scoreSkillMin,
-			scoreSkillMax,
-			scoreSalaryMin,
-			scoreSalaryMax,
-			scoreBidEstMin,
-			scoreBidEstMax,
-			scoreFreshnessMin,
-			scoreFreshnessMax,
-		});
-		const hasScoreFilters = Object.keys(scoreFilters).length > 0;
-
-		// Resolve applier (optional)
-		let applierId = null;
-		if (applierName && accountInfoCollection) {
-			const applierDoc = await accountInfoCollection.findOne({ name: applierName });
-			applierId = applierDoc?._id || null;
-		}
-		const query = { $and: [] };
-
-		const titleFilter = buildMongoCaseInsensitiveRegexFilter(q);
-		if (titleFilter) query.$and.push({ title: titleFilter });
-
-		for (const key in filters) {
-			if (Object.hasOwnProperty.call(filters, key)) {
-				if (key.startsWith('$')) continue;
-				const value = filters[key];
-				if (!value) continue;
-
-				if (key === 'company.tags' && typeof value === 'string') {
-					const tags = value.split(',').map(s => s.trim()).filter(Boolean);
-					if (tags.length) {
-						const tagRegexes = tags.map(tag => buildSafeRegExp(tag)).filter(Boolean);
-						if (tagRegexes.length) {
-							query.$and.push({ [key]: { $all: tagRegexes } });
-						}
-					}
-				} else if (key === 'details.remote' || key === 'details.time') {
-					query.$and.push({ [key]: value });
-				} else if (typeof value === 'string') {
-					const filter = buildMongoCaseInsensitiveRegexFilter(value);
-					if (filter) query.$and.push({ [key]: filter });
-				}
-			}
-		}
-
-		// Job source: match the denormalized `source` field (set at insert / backfill
-		// from the apply-link hostname) — indexed equality instead of per-doc regexes.
-		// Omitted `jobSources` means "all sources" (no filter), not "none".
-		const jobSourceItem = (jobSources !== undefined ? jobSources.split(',') : JobSourceTitles)
-			.map((s) => s.trim())
-			.filter(Boolean);
-		const knownSources = JobSourceTitles.filter((s) => s !== 'Other');
-		const allSourcesSelected =
-		jobSourceItem.includes('Other') && knownSources.every((s) => jobSourceItem.includes(s));
-
-		// When every source (including Other) is selected the filter is a tautology — skip it.
-		if (!allSourcesSelected) {
-			query.$and.push({ source: { $in: jobSourceItem } });
-		}
-
-		// Normalize boolean-like flags that may arrive as booleans or strings
-		const appliedBool = applied === true || applied === 'true'
-			? true
-			: applied === false || applied === 'false'
-				? false
-				: undefined;
-
-		if (appliedBool === false) {
-			// Posted: no status entry for this applier
-			if (applierId) {
-				query.$and.push({ $or: [{ status: { $exists: false } }, { status: { $not: { $elemMatch: { applier: applierId } } } }] });
-			} else {
-				// Without applier, fallback to no status at all
-				query.$and.push({ status: { $exists: false } });
-			}
-		} else if (appliedBool === true) {
-			// Applied filters for this applier
-			if (applierId) {
-				if (status === 'Applied') {
-					query.$and.push({ status: { $elemMatch: { applier: applierId, appliedDate: { $exists: true }, scheduledDate: { $exists: false }, declinedDate: { $exists: false } } } });
-				} else if (status === 'Scheduled') {
-					query.$and.push({ status: { $elemMatch: { applier: applierId, scheduledDate: { $exists: true } } } });
-				} else if (status === 'Declined') {
-					query.$and.push({ status: { $elemMatch: { applier: applierId, declinedDate: { $exists: true } } } });
-				} else {
-					query.$and.push({ status: { $elemMatch: { applier: applierId } } });
-				}
-			} else {
-				// No applier specified: keep previous behavior
-				query.$and.push({ status: { $exists: true } });
-				if (status === 'Applied') {
-					query.$and.push({ status: { $elemMatch: { appliedDate: { $exists: true }, scheduledDate: { $exists: false }, declinedDate: { $exists: false } } } });
-				} else if (status === 'Scheduled') {
-					query.$and.push({ status: { $elemMatch: { scheduledDate: { $exists: true } } } });
-				} else if (status === 'Declined') {
-					query.$and.push({ status: { $elemMatch: { declinedDate: { $exists: true } } } });
-				}
-			}
-		}
-
-		if (postedAtFrom || postedAtTo) {
-			const postedAtQuery = {};
-			if (postedAtFrom) {
-				postedAtQuery.$gte = postedAtFrom;
-			}
-			if (postedAtTo) {
-				const toDate = new Date(postedAtTo);
-				toDate.setDate(toDate.getDate() + 1);
-				postedAtQuery.$lt = toDate.toISOString().split('T')[0];
-			}
-			query.$and.push({ postedAt: postedAtQuery });
-		}
-
-		if (query.$and.length === 1) {
-			Object.assign(query, query.$and[0]);
-			delete query.$and;
-		} else if (query.$and.length === 0) {
-			delete query.$and;
-		}
+		const { query, scoreFilters, hasScoreFilters } = await buildJobsListQuery(req.body);
 
 		const pageNum = Math.max(1, parseInt(page, 10) || 1);
 		const limitNum = Math.max(1, Math.min(5000, parseInt(limit, 10) || 10));
@@ -403,6 +265,20 @@ export async function getJobs(req, res) {
 			skipRaw !== undefined && skipRaw !== null && skipRaw !== ''
 				? Math.max(0, parseInt(skipRaw, 10) || 0)
 				: (pageNum - 1) * limitNum;
+
+		if (countsOnly === true || countsOnly === 'true') {
+			const total = await jobsCollection.countDocuments(query);
+			return res.json({
+				success: true,
+				data: [],
+				pagination: {
+					total,
+					page: pageNum,
+					limit: limitNum,
+					totalPages: Math.ceil(total / limitNum),
+				},
+			});
+		}
 
 		let docs;
 		let total;
@@ -429,7 +305,12 @@ export async function getJobs(req, res) {
 				recommendationReason = result.reason || 'unknown';
 				const sortOption = { postedAt: -1, _id: -1 };
 				[docs, total] = await Promise.all([
-					jobsCollection.find(query).sort(sortOption).skip(skip).limit(limitNum).toArray(),
+					jobsCollection
+						.find(query, { projection: JOB_LIST_PROJECTION })
+						.sort(sortOption)
+						.skip(skip)
+						.limit(limitNum)
+						.toArray(),
 					jobsCollection.countDocuments(query),
 				]);
 			}
@@ -459,7 +340,12 @@ export async function getJobs(req, res) {
 				sortOption.postedAt = -1;
 			}
 			[docs, total] = await Promise.all([
-				jobsCollection.find(query).sort(sortOption).skip(skip).limit(limitNum).toArray(),
+				jobsCollection
+					.find(query, { projection: JOB_LIST_PROJECTION })
+					.sort(sortOption)
+					.skip(skip)
+					.limit(limitNum)
+					.toArray(),
 				jobsCollection.countDocuments(query),
 			]);
 		}

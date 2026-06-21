@@ -1,4 +1,5 @@
 import { resolveSkillToCanonical, resolvePersonalSkill } from '../skillGraph/resolve.js';
+import { findExactMatches } from '../skillGraph/search.js';
 import { normalizeSkillKey, normalizeSurfaceForm } from '../skillGraph/normalize.js';
 import {
 	userKnowledgeGraphsCollection,
@@ -66,27 +67,37 @@ export async function buildUserGraphFromResume({
 
 	await enqueueSkills(cooc, cooc);
 
-	const resolvedSkills = [];
-	for (const { name: raw, strength } of normalizedInputs) {
-		const surfaceForm = normalizeSurfaceForm(raw);
-		const normalizedKey = normalizeSkillKey(surfaceForm);
-		if (!normalizedKey) continue;
+	const normalizedInputsWithKeys = normalizedInputs
+		.map(({ name: raw, strength }) => {
+			const surfaceForm = normalizeSurfaceForm(raw);
+			const normalizedKey = normalizeSkillKey(surfaceForm);
+			return normalizedKey ? { raw, strength, surfaceForm, normalizedKey } : null;
+		})
+		.filter(Boolean);
 
-		const resolved = await resolveSkillToCanonical(surfaceForm, {
-			enqueueIfMissing: true,
-			cooccurringSkills: cooc,
-		});
+	const matchMap = await findExactMatches(normalizedInputsWithKeys.map((item) => item.normalizedKey));
+
+	const missingForEnqueue = [];
+	const resolvedSkills = [];
+	for (const { raw, strength, surfaceForm, normalizedKey } of normalizedInputsWithKeys) {
+		const exact = matchMap.get(normalizedKey);
+		if (!exact?.id) {
+			missingForEnqueue.push(surfaceForm);
+		}
 
 		const proficiency = strength / 10;
-
 		resolvedSkills.push({
-			surfaceForm: resolved.raw || surfaceForm,
-			normalizedKey: resolved.normalizedKey || normalizedKey,
-			canonicalId: resolved.canonicalId || null,
+			surfaceForm: surfaceForm || raw,
+			normalizedKey,
+			canonicalId: exact?.id || null,
 			strength,
 			proficiency,
 			sources: ['resume'],
 		});
+	}
+
+	if (missingForEnqueue.length) {
+		await enqueueSkills(missingForEnqueue, cooc);
 	}
 
 	const edges = [];

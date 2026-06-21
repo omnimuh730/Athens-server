@@ -1,16 +1,22 @@
-import neo4j from 'neo4j-driver';
-import { isNeo4jReady, runRead } from '../../db/neo4j.js';
+import { isNeo4jReady, runReadBatch, toNeo4jInt } from '../../db/neo4j.js';
 import { RELATION_TYPES } from '../skillGraph/search.js';
 
 const DEFAULT_NODE_LIMIT = 2000;
 const DEFAULT_EDGE_LIMIT = 5000;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+const graphCache = new Map();
 
 function intParam(n) {
-	return neo4j.int(Math.max(0, Math.floor(Number(n) || 0)));
+	return toNeo4jInt(n);
 }
 
 function num(v) {
 	return typeof v?.toNumber === 'function' ? v.toNumber() : Number(v ?? 0);
+}
+
+function cacheKey(nodeLimit, edgeLimit) {
+	return `${nodeLimit}:${edgeLimit}`;
 }
 
 /** Map Neo4j skillType/category to frontend SkillCategory slug. */
@@ -34,31 +40,42 @@ export function mapToSkillCategory(skillType, category) {
 
 /**
  * Fetch the shared world skill graph for the Knowledge Graph UI.
+ * Results are cached in memory for CACHE_TTL_MS.
  */
 export async function fetchWorldGraph({ nodeLimit = DEFAULT_NODE_LIMIT, edgeLimit = DEFAULT_EDGE_LIMIT } = {}) {
 	if (!isNeo4jReady()) {
 		throw new Error('Neo4j is not connected');
 	}
 
-	const nodeRecords = await runRead(
-		`
-		MATCH (s:Skill)
-		RETURN s.id AS id, s.label AS label, s.category AS category, s.skillType AS skillType
-		ORDER BY s.label
-		LIMIT $limit
-		`,
-		{ limit: intParam(nodeLimit) },
-	);
+	const key = cacheKey(nodeLimit, edgeLimit);
+	const cached = graphCache.get(key);
+	if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+		return cached.data;
+	}
 
-	const edgeRecords = await runRead(
-		`
-		MATCH (a:Skill)-[r]->(b:Skill)
-		WHERE type(r) IN $relTypes
-		RETURN a.id AS from, b.id AS to, type(r) AS type, coalesce(r.weight, 0.5) AS weight
-		LIMIT $limit
-		`,
-		{ relTypes: RELATION_TYPES, limit: intParam(edgeLimit) },
-	);
+	const [nodeRecords, edgeRecords, countRecords] = await runReadBatch([
+		{
+			cypher: `
+				MATCH (s:Skill)
+				RETURN s.id AS id, s.label AS label, s.category AS category, s.skillType AS skillType
+				ORDER BY s.label
+				LIMIT $limit
+			`,
+			params: { limit: intParam(nodeLimit) },
+		},
+		{
+			cypher: `
+				MATCH (a:Skill)-[r]->(b:Skill)
+				WHERE type(r) IN $relTypes
+				RETURN a.id AS from, b.id AS to, type(r) AS type, coalesce(r.weight, 0.5) AS weight
+				LIMIT $limit
+			`,
+			params: { relTypes: RELATION_TYPES, limit: intParam(edgeLimit) },
+		},
+		{
+			cypher: 'MATCH (s:Skill) RETURN count(s) AS total',
+		},
+	]);
 
 	const nodes = nodeRecords.map(r => {
 		const skillType = r.get('skillType');
@@ -82,13 +99,20 @@ export async function fetchWorldGraph({ nodeLimit = DEFAULT_NODE_LIMIT, edgeLimi
 		}))
 		.filter(e => nodeIds.has(e.from) && nodeIds.has(e.to));
 
-	const countRecords = await runRead('MATCH (s:Skill) RETURN count(s) AS total');
 	const totalNodes = num(countRecords[0]?.get('total'));
 
-	return {
+	const data = {
 		nodes,
 		edges,
 		totalNodes,
 		truncated: totalNodes > nodes.length,
 	};
+
+	graphCache.set(key, { at: Date.now(), data });
+	return data;
+}
+
+/** Invalidate cached world graph (e.g. after enrichment writes). */
+export function invalidateWorldGraphCache() {
+	graphCache.clear();
 }
