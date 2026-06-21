@@ -1,4 +1,5 @@
 import { resolveSkillToCanonical, listGraphSkills } from '../services/skillGraph/resolve.js';
+import { enhanceRelationsAmongSkills } from '../services/skillEnrichment/enhanceRelations.js';
 import { fetchSubgraph } from '../services/skillGraph/search.js';
 import { fetchWorldGraph } from '../services/skillGraph/worldGraph.js';
 import {
@@ -131,11 +132,40 @@ export async function listSkillsHandler(req, res) {
 	try {
 		if (!isNeo4jReady()) return res.status(503).json({ success: false, error: 'Neo4j not ready' });
 		const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-		const limit = Math.max(1, parseInt(req.query.limit, 10) || 30);
+		const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 30));
 		const q = String(req.query.q || '');
+		const idsOnly = req.query.idsOnly === 'true' || req.query.idsOnly === '1';
+		const maxIds = Math.min(500, parseInt(req.query.maxIds, 10) || 200);
+
+		if (idsOnly) {
+			const { skills, total } = await listGraphSkills({ q, skip: 0, limit: maxIds });
+			return res.json({
+				success: true,
+				ids: skills.map(s => s.id),
+				total,
+			});
+		}
+
 		const { skills, total } = await listGraphSkills({ q, skip: (page - 1) * limit, limit });
 		return res.json({ success: true, skills, pagination: { total, page, limit } });
 	} catch (err) {
 		return res.status(500).json({ success: false, error: err.message });
+	}
+}
+
+export async function enhanceRelationsHandler(req, res) {
+	try {
+		if (!isNeo4jReady()) return res.status(503).json({ success: false, error: 'Neo4j not ready' });
+		const { skillIds, applierName } = req.body || {};
+		if (!Array.isArray(skillIds) || skillIds.length < 2) {
+			return res.status(400).json({ success: false, error: 'skillIds array with at least 2 entries required' });
+		}
+
+		const result = await enhanceRelationsAmongSkills(skillIds, { applierName });
+		return res.json({ success: true, ...result });
+	} catch (err) {
+		console.error('POST /api/skills/enrichment/enhance-relations error', err);
+		const status = err.message.includes('API key') ? 400 : 500;
+		return res.status(status).json({ success: false, error: err.message });
 	}
 }
