@@ -1,5 +1,6 @@
-import { runRead } from '../../db/neo4j.js';
+import { runRead, runReadBatch } from '../../db/neo4j.js';
 import { normalizeSkillKey, stringSimilarity } from './normalize.js';
+import { mapToSkillCategory } from './categoryMap.js';
 
 const RELATION_TYPES = [
 	'PREREQUISITE_OF',
@@ -211,6 +212,58 @@ export async function fetchSubgraph(skillIds) {
 	}
 
 	return { nodes: [...nodeMap.values()], edges };
+}
+
+/**
+ * Subgraph containing only the given skill nodes and edges between them.
+ * Lightweight — used for enrichment / enhance-relations update previews.
+ */
+export async function fetchInternalSubgraph(skillIds) {
+	const ids = [...new Set(skillIds.map(String).filter(Boolean))];
+	if (!ids.length) return { nodes: [], edges: [] };
+
+	const [nodeRecords, edgeRecords] = await runReadBatch([
+		{
+			cypher: `
+				MATCH (s:Skill)
+				WHERE s.id IN $ids
+				RETURN s.id AS id, s.label AS label, s.category AS category, s.skillType AS skillType
+				ORDER BY s.label
+			`,
+			params: { ids },
+		},
+		{
+			cypher: `
+				MATCH (a:Skill)-[r]->(b:Skill)
+				WHERE a.id IN $ids AND b.id IN $ids AND type(r) IN $relTypes
+				RETURN a.id AS from, b.id AS to, type(r) AS type, coalesce(r.weight, 0.5) AS weight
+			`,
+			params: { ids, relTypes: RELATION_TYPES },
+		},
+	]);
+
+	const num = (v) => (typeof v?.toNumber === 'function' ? v.toNumber() : Number(v ?? 0));
+
+	const nodes = nodeRecords.map((r) => {
+		const skillType = r.get('skillType');
+		const category = r.get('category');
+		return {
+			id: r.get('id'),
+			label: r.get('label'),
+			category: mapToSkillCategory(skillType, category),
+			skillType,
+			rawCategory: category,
+		};
+	});
+
+	const edges = edgeRecords.map((r) => ({
+		from: r.get('from'),
+		to: r.get('to'),
+		type: r.get('type'),
+		weight: num(r.get('weight')),
+	}));
+
+	return { nodes, edges };
 }
 
 /** Resolve many raw skill strings to canonical ids (best effort). */

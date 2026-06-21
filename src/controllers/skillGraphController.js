@@ -1,6 +1,6 @@
 import { resolveSkillToCanonical, listGraphSkills } from '../services/skillGraph/resolve.js';
 import { enhanceRelationsAmongSkills } from '../services/skillEnrichment/enhanceRelations.js';
-import { fetchSubgraph } from '../services/skillGraph/search.js';
+import { fetchSubgraph, fetchInternalSubgraph } from '../services/skillGraph/search.js';
 import { fetchWorldGraph } from '../services/skillGraph/worldGraph.js';
 import {
 	startEnrichmentSession,
@@ -40,7 +40,9 @@ export async function getSubgraphHandler(req, res) {
 			.filter(Boolean);
 		if (!ids.length) return res.status(400).json({ success: false, error: 'ids query required' });
 
-		const graph = await fetchSubgraph(ids);
+		const internal = req.query.internal === 'true' || req.query.internal === '1';
+		const capped = ids.slice(0, 80);
+		const graph = internal ? await fetchInternalSubgraph(capped) : await fetchSubgraph(capped);
 		return res.json({ success: true, graph });
 	} catch (err) {
 		console.error('GET /api/skills/graph/subgraph error', err);

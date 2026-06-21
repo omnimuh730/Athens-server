@@ -21,6 +21,7 @@ import {
 } from './config.js';
 import { addUsage, EMPTY_USAGE } from '../llm/llmService.js';
 import { syncCooccurrenceToGraph } from '../skillCooccurrence/index.js';
+import { invalidateWorldGraphCache } from '../skillGraph/worldGraph.js';
 
 let activeSession = null;
 let cancelRequested = false;
@@ -75,6 +76,10 @@ async function runSessionLoop(session) {
 					});
 					session.processed += 1;
 					session.usage = addUsage(session.usage, result.usage);
+					if (result.skillId) {
+						session.updatedSkillIds.add(result.skillId);
+					}
+					session.relationshipsUpdated += result.relationshipCount ?? 0;
 					session.lastSkill = {
 						normalizedKey: item.normalizedKey,
 						surfaceForm: item.surfaceForm,
@@ -102,6 +107,9 @@ async function runSessionLoop(session) {
 		}
 		const stats = await countQueueStats();
 		session.remaining = stats.pending;
+		if (session.updatedSkillIds.size > 0) {
+			invalidateWorldGraphCache();
+		}
 	}
 }
 
@@ -117,6 +125,9 @@ export function getEnrichmentSessionStatus() {
 		processed: activeSession.processed,
 		failed: activeSession.failed,
 		remaining: activeSession.remaining,
+		nodesUpdated: activeSession.updatedSkillIds?.size ?? 0,
+		relationshipsUpdated: activeSession.relationshipsUpdated ?? 0,
+		updatedSkillIds: [...(activeSession.updatedSkillIds || [])].slice(-80),
 		usage: activeSession.usage,
 		lastSkill: activeSession.lastSkill ?? null,
 		startedAt: activeSession.startedAt,
@@ -149,6 +160,8 @@ export async function startEnrichmentSession({ applierName = null, mode = null, 
 		remaining: stats.pending,
 		usage: EMPTY_USAGE(),
 		lastSkill: null,
+		updatedSkillIds: new Set(),
+		relationshipsUpdated: 0,
 		startedAt: new Date().toISOString(),
 		finishedAt: null,
 	};

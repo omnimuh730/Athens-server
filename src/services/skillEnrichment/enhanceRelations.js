@@ -1,6 +1,7 @@
 import { runRead } from '../../db/neo4j.js';
 import { chatCompletion, EMPTY_USAGE } from '../llm/llmService.js';
 import { upsertRelationships } from '../skillGraph/apply.js';
+import { invalidateWorldGraphCache } from '../skillGraph/worldGraph.js';
 import { resolveLlmConfig, getEnrichmentModel } from './config.js';
 import { traceLlm, clip } from './trace.js';
 
@@ -142,10 +143,17 @@ export async function enhanceRelationsAmongSkills(skillIds = [], { applierName, 
 		allRelationships.push(...relationships);
 	}
 
+	if (applied > 0) {
+		invalidateWorldGraphCache();
+	}
+
 	return {
 		skillsProcessed: skills.length,
 		relationshipsProposed: allRelationships.length,
 		relationshipsApplied: applied,
+		nodesUpdated: skills.length,
+		relationshipsUpdated: applied,
+		updatedSkillIds: skills.map(s => s.id),
 		usage: totalUsage,
 	};
 }
