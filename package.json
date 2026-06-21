@@ -11,8 +11,10 @@
 		"backfill-job-embeddings": "node src/scripts/backfillJobEmbeddings.js",
 		"backfill-resume-embeddings": "node src/scripts/backfillResumeEmbeddings.js",
 		"ollama-pull-embed": "ollama pull mxbai-embed-large",
-		"qdrant:start": "bash scripts/start-qdrant-local.sh",
-		"qdrant:stop": "bash scripts/stop-qdrant-local.sh",
+		"qdrant:start": "bash scripts/start-qdrant.sh",
+		"qdrant:stop": "bash scripts/stop-qdrant.sh",
+		"qdrant:start-native": "bash scripts/start-qdrant-local.sh",
+		"qdrant:stop-native": "bash scripts/stop-qdrant-local.sh",
 		"reset-skill-graph": "node src/scripts/resetSkillGraph.js"
 	},
 	"dependencies": {

@@ -75,8 +75,7 @@ export async function initQdrantCollections() {
 		const url = process.env.QDRANT_URL || '(not set)';
 		console.error(
 			`[qdrant] init failed: ${err.message}. `
-			+ `Is Qdrant running at ${url}? Try: npm run qdrant:start (macOS, no Docker) `
-			+ `or: cd Athens-server && docker compose up -d qdrant`,
+			+ `Is Qdrant running at ${url}? Try: cd Athens-server && npm run qdrant:start`,
 		);
 		return false;
 	}

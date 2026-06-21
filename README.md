@@ -93,28 +93,21 @@ EMBEDDING_DIMENSIONS=1024
 
 ### 3. Qdrant (vector store)
 
-Qdrant must be listening on `http://127.0.0.1:6333` before recommendations work.
-
-**macOS without Docker (recommended if Docker Desktop is off):**
+Qdrant runs as a **Docker service** on `http://127.0.0.1:6333` (dashboard: `/dashboard`). Data persists in the Docker volume `qdrant_storage` — not in the repo.
 
 ```bash
 cd Athens-server
-npm run qdrant:start    # downloads binary to .local/qdrant/ on first run
-npm run qdrant:stop     # stop background process
-```
-
-**With Docker** (run from `Athens-server/`, not the repo root):
-
-```bash
-cd Athens-server
-docker compose up -d qdrant
+npm run qdrant:start    # docker compose up -d qdrant
+npm run qdrant:stop
 ```
 
 ```env
 QDRANT_URL=http://127.0.0.1:6333
 ```
 
-Collections `job_vectors` and `resume_vectors` are created automatically on server start (1024 dimensions with default Ollama settings).
+**Important:** Do not run the old embedded binary (`npm run qdrant:start-native`) at the same time — both bind port 6333. Only one Qdrant instance should be active.
+
+Collections `job_vectors` and `resume_vectors` are created automatically when Athens-server starts (1024 dimensions with default Ollama settings).
 
 ### 4. Backfill embeddings
 
@@ -169,8 +162,9 @@ Switching embedding provider or dimensions requires **re-backfilling** all vecto
 |--------|-------------|
 | `npm start` | Dev server (nodemon) |
 | `npm run migrate` | Mongo migrations |
-| `npm run qdrant:start` | Download & start local Qdrant (macOS, no Docker) |
-| `npm run qdrant:stop` | Stop local Qdrant |
+| `npm run qdrant:start` | Start Qdrant via Docker on `:6333` |
+| `npm run qdrant:stop` | Stop Docker Qdrant |
+| `npm run qdrant:start-native` | Legacy embedded binary (`.local/qdrant/`) |
 | `npm run backfill-job-embeddings` | Embed all jobs into Qdrant |
 | `npm run backfill-resume-embeddings` | Embed all analyzed resumes into Qdrant |
 | `npm run reset-skill-graph` | Reset Neo4j skill graph (destructive) |
@@ -216,11 +210,12 @@ Athens-server/
 
 | Issue | Fix |
 |-------|-----|
-| `docker.sock: connect: no such file` | Docker Desktop is not running. Use `npm run qdrant:start` from **Athens-server/** instead of Docker. |
+| `docker.sock: connect: no such file` | Start Docker Desktop, then `npm run qdrant:start` from **Athens-server/**. |
 | `no configuration file provided: not found` | Run `docker compose` from **Athens-server/** (where `docker-compose.yml` lives), not the repo root. |
 | `[embeddings] Ollama not ready` | Start Ollama app or run `ollama serve`; then `npm run ollama-pull-embed`. |
 | `[qdrant] QDRANT_URL not set` | Set `QDRANT_URL` and start Qdrant (`npm run qdrant:start` or Docker). |
-| `[qdrant] init failed: fetch failed` (but curl works) | Restart the server after updating — Qdrant uses native `fetch` (Node 22+ compatible). Confirm with `npm run qdrant:start`. |
+| `[qdrant] init failed: fetch failed` (but curl works) | Restart Athens-server after Qdrant is up. Confirm: `curl http://127.0.0.1:6333/collections` |
+| Qdrant dashboard shows no collections | Wrong instance on `:6333` — stop native (`npm run qdrant:stop-native`) and use Docker (`npm run qdrant:start`). Restart Athens-server to create collections. |
 | Job Search shows fallback banner | Analyze at least one resume; run both backfill scripts; confirm Qdrant + Ollama. |
 | Wrong vector dimension errors | Model/dimension changed — reset Qdrant data and re-run backfills. |
 | Neo4j errors | Check `NEO4J_*` in `.env`; skill enrichment disabled until Neo4j is up unless `NEO4J_REQUIRED=true`. |
