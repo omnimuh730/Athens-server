@@ -7,7 +7,7 @@ import {
 import { embedText } from '../embeddings/embeddingService.js';
 import { buildResumeEmbeddingText } from '../embeddings/embeddingText.js';
 import { getResumeVector, isQdrantReady } from '../vectorStore/qdrantClient.js';
-import { upsertResumeEmbedding } from '../embeddings/embeddingIngest.js';
+import { upsertResumeEmbedding, upsertProfileEmbedding, getProfileVector, PROFILE_GRAPH_ID } from '../embeddings/embeddingIngest.js';
 import { getCandidatePoolSize } from '../vectorStore/collections.js';
 import { retrieveJobCandidates } from './vectorRetrieval.js';
 import { computeGraphBoost } from './graphRankBoost.js';
@@ -84,7 +84,25 @@ async function buildResumeVectorEntries(resumes, applierName) {
 			vector,
 		});
 	}
-	return entries.filter((e) => e.vector?.length);
+
+	let withVectors = entries.filter((e) => e.vector?.length);
+
+	let profileVector = (await getProfileVector(applierName))?.vector;
+	if (!profileVector?.length) {
+		const profileResult = await upsertProfileEmbedding(applierName, { applierName });
+		if (profileResult.ok) {
+			profileVector = (await getProfileVector(applierName))?.vector;
+		}
+	}
+	if (profileVector?.length) {
+		withVectors.push({
+			resumeId: PROFILE_GRAPH_ID,
+			techStack: 'Profile',
+			vector: profileVector,
+		});
+	}
+
+	return withVectors;
 }
 
 async function scoreCandidates(candidateMap, applierName) {

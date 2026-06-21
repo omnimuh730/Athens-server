@@ -3,7 +3,7 @@ dotenv.config();
 
 import { initMongo, userResumesCollection } from '../src/db/mongo.js';
 import { initQdrantCollections } from '../src/services/vectorStore/qdrantClient.js';
-import { upsertResumeEmbedding } from '../src/services/embeddings/embeddingIngest.js';
+import { upsertResumeEmbedding, upsertProfileEmbedding } from '../src/services/embeddings/embeddingIngest.js';
 
 async function main() {
 	await initMongo();
@@ -17,6 +17,7 @@ async function main() {
 	let processed = 0;
 	let ok = 0;
 	let skipped = 0;
+	const owners = new Set();
 
 	const cursor = userResumesCollection.find(
 		{ analyzed: true },
@@ -25,6 +26,7 @@ async function main() {
 
 	for await (const resume of cursor) {
 		processed += 1;
+		owners.add(resume.ownerName);
 		const result = await upsertResumeEmbedding(String(resume._id), resume.ownerName, {
 			applierName: resume.ownerName,
 		});
@@ -35,7 +37,16 @@ async function main() {
 		}
 	}
 
-	console.log(`Done. ${processed} resumes processed — ${ok} embedded, ${skipped} skipped.`);
+	let profileOk = 0;
+	for (const ownerName of owners) {
+		const result = await upsertProfileEmbedding(ownerName, { applierName: ownerName });
+		if (result.ok) profileOk += 1;
+	}
+
+	console.log(
+		`Done. ${processed} resumes — ${ok} embedded, ${skipped} skipped. `
+		+ `${profileOk}/${owners.size} profile embedding(s) updated.`,
+	);
 	process.exit(0);
 }
 

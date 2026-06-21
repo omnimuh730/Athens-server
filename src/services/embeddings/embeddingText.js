@@ -31,6 +31,16 @@ export function buildResumeEmbeddingText(resumeDoc) {
 	return parts.join('\n\n').trim();
 }
 
+/** Aggregated profile embedding text (max-strength skills across analyzed resumes). */
+export function buildProfileEmbeddingText(ownerName, skillProfile = []) {
+	const name = String(ownerName || '').trim();
+	const skillLine = formatSkillProfile(skillProfile);
+	const parts = [];
+	if (name) parts.push(`Professional profile: ${name}`);
+	if (skillLine) parts.push(`Skills: ${skillLine}`);
+	return parts.join('\n\n').trim();
+}
+
 export function buildJobEmbeddingText(jobDoc) {
 	const title = String(jobDoc?.title ?? '').trim();
 	const skills = Array.isArray(jobDoc?.skills)

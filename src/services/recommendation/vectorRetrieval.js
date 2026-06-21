@@ -1,3 +1,6 @@
+import { getVectorTopK } from '../vectorStore/collections.js';
+import { getResumeVector, searchJobVectors } from '../vectorStore/qdrantClient.js';
+
 /**
  * Multi-vector retrieval: search jobs for each resume vector, merge with MAX (no averaging).
  * @param {Array<{ resumeId: string, techStack?: string, vector?: number[] }>} resumeVectors

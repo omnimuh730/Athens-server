@@ -179,3 +179,59 @@ export async function getResumeVector(resumeId) {
 	if (!point?.vector) return null;
 	return { vector: point.vector, payload: point.payload || {} };
 }
+
+export function profilePointId(ownerName) {
+	return toPointId(`profile:${String(ownerName || '').trim()}`);
+}
+
+export async function upsertProfileVector(ownerName, vector, payload = {}) {
+	if (!isQdrantReady()) return false;
+
+	const name = String(ownerName || '').trim();
+	await qdrantFetch(`/collections/${encodeURIComponent(RESUME_VECTORS_COLLECTION)}/points?wait=true`, {
+		method: 'PUT',
+		body: {
+			points: [{
+				id: profilePointId(name),
+				vector,
+				payload: {
+					ownerName: name,
+					resumeId: '__profile__',
+					kind: 'profile',
+					...payload,
+				},
+			}],
+		},
+	});
+	return true;
+}
+
+export async function getProfileVector(ownerName) {
+	if (!isQdrantReady()) return null;
+
+	const data = await qdrantFetch(`/collections/${encodeURIComponent(RESUME_VECTORS_COLLECTION)}/points`, {
+		method: 'POST',
+		body: {
+			ids: [profilePointId(ownerName)],
+			with_vector: true,
+			with_payload: true,
+		},
+	});
+
+	const point = data?.result?.[0];
+	if (!point?.vector) return null;
+	return { vector: point.vector, payload: point.payload || {} };
+}
+
+export async function deleteProfileVector(ownerName) {
+	if (!isQdrantReady()) return false;
+	try {
+		await qdrantFetch(`/collections/${encodeURIComponent(RESUME_VECTORS_COLLECTION)}/points/delete?wait=true`, {
+			method: 'POST',
+			body: { points: [profilePointId(ownerName)] },
+		});
+	} catch {
+		// Point may not exist
+	}
+	return true;
+}
