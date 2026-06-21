@@ -2,7 +2,6 @@ import { resolveMailCredentials } from './credentials.js';
 import {
 	fetchFlagsForUids,
 	fetchMessageBody,
-	fetchEnvelopeForUid,
 	fetchMailboxPage,
 	fetchNewEnvelopes,
 	fetchFolderCounts,
@@ -18,7 +17,8 @@ import {
 	upsertMessages,
 	upsertSyncState,
 	messageToThread,
-	clearMessageBody,
+	getMessagesByUids,
+	enrichMessagesFromCache,
 } from './mailStore.js';
 import { ALL_MAIL_PATH, folderToMailbox } from './folderMapper.js';
 
@@ -36,7 +36,7 @@ export async function loadCachedFolderPage(applierName, folder, page, pageSize) 
 	const docs = await listMessages(applierName, { folder, mailbox, page, pageSize });
 	return {
 		ok: true,
-		threads: docs.map(messageToThread),
+		threads: docs.map((doc) => messageToThread(doc, { includeBody: false })),
 		total,
 		page,
 		pageSize,
@@ -70,9 +70,16 @@ export async function loadFolderPage(applierName, folder, page, pageSize) {
 			folderCountsUpdatedAt: new Date(),
 		});
 
+		const mailboxPath = folderToMailbox(folder);
+		const uids = messages.map((m) => m.uid);
+		const cachedDocs = uids.length
+			? await getMessagesByUids(applierName, uids, mailboxPath)
+			: [];
+		const enriched = enrichMessagesFromCache(messages, cachedDocs);
+
 		return {
 			ok: true,
-			threads: messages.map(messageToThread),
+			threads: enriched.map((doc) => messageToThread(doc, { includeBody: false })),
 			total,
 			page,
 			pageSize,
@@ -88,7 +95,7 @@ export async function loadLabelOrSearchPage(applierName, { folder, label, search
 	const docs = await listMessages(applierName, { folder, label, search, page, pageSize });
 	return {
 		ok: true,
-		threads: docs.map(messageToThread),
+		threads: docs.map((doc) => messageToThread(doc, { includeBody: false })),
 		total,
 		page,
 		pageSize,
@@ -187,29 +194,11 @@ export async function ensureMessageBody(applierName, uid, mailbox) {
 
 	const { getMessage, updateMessageBody } = await import('./mailStore.js');
 	const mailboxPath = mailbox || ALL_MAIL_PATH;
-	let existing = await getMessage(applierName, uid, mailboxPath);
+	const existing = await getMessage(applierName, uid, mailboxPath);
 
-	if (existing?.hasBody && existing.bodyHtml) {
-		try {
-			const freshEnvelope = await fetchEnvelopeForUid(
-				creds.email,
-				creds.password,
-				uid,
-				applierName,
-				mailboxPath,
-			);
-			if (
-				freshEnvelope?.messageId &&
-				existing.messageId &&
-				freshEnvelope.messageId === existing.messageId
-			) {
-				return { ok: true, message: existing };
-			}
-		} catch {
-			// Re-fetch body below
-		}
-		await clearMessageBody(applierName, uid, mailboxPath);
-		existing = await getMessage(applierName, uid, mailboxPath);
+	// Mongo cache hit — skip IMAP entirely (mailbox-scoped keys prevent wrong-body reuse).
+	if (existing?.hasBody && (existing.bodyHtml || existing.bodyText)) {
+		return { ok: true, message: existing, fromCache: true };
 	}
 
 	try {
@@ -226,7 +215,7 @@ export async function ensureMessageBody(applierName, uid, mailbox) {
 			flags: body.flags,
 			messageId: body.messageId || existing?.messageId || null,
 		}, mailboxPath);
-		return { ok: true, message: updated };
+		return { ok: true, message: updated, fromCache: false };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		return { ok: false, error: message };
@@ -239,7 +228,7 @@ export async function prefetchMessageBodies(applierName, uids, mailbox = ALL_MAI
 	if (!creds.ok) return;
 
 	const { getMessage } = await import('./mailStore.js');
-	for (const uid of uids.slice(0, 10)) {
+	for (const uid of uids) {
 		const existing = await getMessage(applierName, uid, mailbox);
 		if (existing?.hasBody) continue;
 		try {

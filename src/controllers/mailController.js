@@ -131,12 +131,24 @@ export async function getMailMessage(req, res) {
 			return res.status(404).json({ success: false, error: 'Message not found' });
 		}
 
+		if (doc.hasBody && (doc.bodyHtml || doc.bodyText)) {
+			return res.json({
+				success: true,
+				thread: messageToThread(doc),
+				fromCache: true,
+			});
+		}
+
 		const bodyResult = await ensureMessageBody(applierName, uid, doc.mailbox || mailbox);
 		if (bodyResult.ok && bodyResult.message) {
 			doc = bodyResult.message;
 		}
 
-		return res.json({ success: true, thread: messageToThread(doc) });
+		return res.json({
+			success: true,
+			thread: messageToThread(doc),
+			fromCache: bodyResult.fromCache ?? false,
+		});
 	} catch (err) {
 		console.error('GET /api/mail/messages/:uid error', err);
 		return res.status(500).json({ success: false, error: err.message });

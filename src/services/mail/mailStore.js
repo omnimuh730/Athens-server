@@ -229,6 +229,39 @@ export async function getCachedMessageCount(applierName, uids, mailbox = ALL_MAI
 	});
 }
 
+/** Load cached body flags (and content) for a page of IMAP envelopes. */
+export async function getMessagesByUids(applierName, uids, mailbox = ALL_MAIL_PATH) {
+	if (!mailMessagesCollection || !uids.length) return [];
+	return mailMessagesCollection
+		.find({ applierName, mailbox, uid: { $in: uids } })
+		.project({
+			uid: 1,
+			hasBody: 1,
+			bodyHtml: 1,
+			bodyText: 1,
+			preview: 1,
+			messageId: 1,
+		})
+		.toArray();
+}
+
+export function enrichMessagesFromCache(messages, cachedDocs) {
+	if (!cachedDocs.length) return messages;
+	const byUid = new Map(cachedDocs.map((d) => [d.uid, d]));
+	return messages.map((msg) => {
+		const cached = byUid.get(msg.uid);
+		if (!cached?.hasBody) return msg;
+		return {
+			...msg,
+			hasBody: true,
+			bodyHtml: cached.bodyHtml ?? msg.bodyHtml,
+			bodyText: cached.bodyText || msg.bodyText,
+			preview: cached.preview || msg.preview,
+			messageId: cached.messageId || msg.messageId,
+		};
+	});
+}
+
 export async function getRecentUidsForFlagRefresh(applierName, days = 7) {
 	if (!mailMessagesCollection) return [];
 	const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
@@ -248,7 +281,7 @@ export async function saveUserLabels(_applierName, labels) {
 	return labels;
 }
 
-export function messageToThread(doc) {
+export function messageToThread(doc, { includeBody = true } = {}) {
 	const date = doc.date instanceof Date ? doc.date : new Date(doc.date);
 	const customLabels = doc.gmailLabels?.length
 		? extractCustomLabels(doc.gmailLabels)
@@ -266,8 +299,8 @@ export function messageToThread(doc) {
 		fromEmail: doc.from?.email || '',
 		subj: doc.subject || '(No subject)',
 		prev: doc.preview || '',
-		body: doc.bodyText || doc.preview || '',
-		bodyHtml: doc.bodyHtml || null,
+		body: includeBody ? doc.bodyText || doc.preview || '' : doc.preview || '',
+		bodyHtml: includeBody ? doc.bodyHtml || null : null,
 		time: formatMailTime(date),
 		date: date.toISOString(),
 		unread: !doc.flags?.seen,
