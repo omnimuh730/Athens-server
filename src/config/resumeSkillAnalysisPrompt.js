@@ -20,6 +20,8 @@ Extract skills from the resume and assign each a strength score from 0 to 10 ref
 
 7. **Never invent** skills with no evidence in the resume text.
 
+8. **Never include** job titles, employer names, dates, locations, bullet sentences, or generic section labels as skills. Only technical/professional competencies (languages, frameworks, cloud services, tools, methodologies).
+
 ---
 
 ## Scoring scale

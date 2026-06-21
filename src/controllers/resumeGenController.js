@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { accountInfoCollection, resumeGeneratorConfigCollection, resumeGenerationsCollection } from "../db/mongo.js";
-import { syncGeneratedResumeAfterRun } from "../services/generatedResumeService.js";
+import { syncGeneratedResumeAfterRun, deleteGenerationRun } from "../services/generatedResumeService.js";
+import { analyzeGeneratedResumeSkills } from "../services/generatedResumeSkillAnalysis.js";
 import {
   PROVIDERS,
   getProvider,
@@ -24,6 +25,20 @@ async function findProfile(applierNameRaw) {
     acc = await accountInfoCollection.findOne({ name: { $regex: new RegExp(`^${esc}$`, "i") } }, proj);
   }
   return acc?.autoBidProfile || null;
+}
+
+/** Load resume catalog for techStack matching. */
+async function findResumeCatalog(applierNameRaw) {
+  const name = cleanString(applierNameRaw);
+  if (!name || !accountInfoCollection) return null;
+  const proj = { projection: { resumeCatalog: 1 } };
+  let acc = await accountInfoCollection.findOne({ name }, proj);
+  if (!acc) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    acc = await accountInfoCollection.findOne({ name: { $regex: new RegExp(`^${esc}$`, "i") } }, proj);
+  }
+  const catalog = acc?.resumeCatalog;
+  return catalog && typeof catalog === "object" && !Array.isArray(catalog) ? catalog : null;
 }
 
 function apiKeyFor(profile, providerId) {
@@ -207,6 +222,76 @@ async function runGeneration({ providerId, apiKey, model, steps, systemInstructi
   return { sections, perStep, usage };
 }
 
+/** Run structured LLM skill analysis after section generation, then sync library. */
+async function finalizeGenerationRun({ prep, body, result, startedAt, onStep }) {
+  let skillProfile = [];
+  let techStack = null;
+  let skillAnalysisError = null;
+
+  const catalog = await findResumeCatalog(body.applierName);
+
+  try {
+    const skillResult = await analyzeGeneratedResumeSkills({
+      sections: result.sections,
+      identity: body.identity,
+      jobDescription: body.jobDescription,
+      catalog,
+      providerId: prep.providerId,
+      apiKey: prep.apiKey,
+      model: prep.model,
+      onProgress: onStep,
+    });
+    skillProfile = skillResult.skillProfile;
+    techStack = skillResult.techStack;
+    result.perStep.push({
+      index: result.perStep.length + 1,
+      ...skillResult.perStep,
+    });
+    result.usage = addUsage(result.usage, skillResult.usage);
+  } catch (err) {
+    skillAnalysisError = err.message;
+    console.warn("[resume-generate] skill analysis failed:", err.message);
+  }
+
+  const generationId = await saveGenerationRun({
+    applierName: cleanString(body.applierName) || null,
+    provider: prep.providerId,
+    model: prep.model,
+    status: "completed",
+    config: configSnapshot(body),
+    identity: body.identity ?? null,
+    jobDescription: cleanString(body.jobDescription) || null,
+    sections: result.sections,
+    perStep: result.perStep,
+    usage: result.usage,
+    skillProfile,
+    techStack,
+    skillAnalysisError,
+    analyzed: skillProfile.length > 0,
+    analyzedAt: skillProfile.length > 0 ? new Date() : null,
+    startedAt,
+    finishedAt: new Date(),
+  });
+
+  try {
+    await syncGeneratedResumeAfterRun({
+      generationId,
+      ownerName: cleanString(body.applierName),
+      sections: result.sections,
+      identity: body.identity,
+      jobDescription: cleanString(body.jobDescription),
+      templateId: body.templateId ?? null,
+      skillProfile,
+      techStack,
+      skillAnalysisError,
+    });
+  } catch (syncErr) {
+    console.warn("[resume-generate] library sync failed:", syncErr.message);
+  }
+
+  return { ...result, skillProfile, techStack, skillAnalysisError, generationId };
+}
+
 // Persist a finished (or failed) run to the local resume_generations history.
 async function saveGenerationRun(doc) {
   try {
@@ -246,33 +331,8 @@ export async function generateResume(req, res) {
   const startedAt = new Date();
   try {
     const result = await runGeneration({ ...prep, systemInstruction: body.systemInstruction, identity: body.identity, applierName: body.applierName, jobDescription: body.jobDescription, reasoningEffort: body.reasoningEffort });
-    const generationId = await saveGenerationRun({
-      applierName: cleanString(body.applierName) || null,
-      provider: prep.providerId,
-      model: prep.model,
-      status: "completed",
-      config: configSnapshot(body),
-      identity: body.identity ?? null,
-      jobDescription: cleanString(body.jobDescription) || null,
-      sections: result.sections,
-      perStep: result.perStep,
-      usage: result.usage,
-      startedAt,
-      finishedAt: new Date(),
-    });
-    try {
-      await syncGeneratedResumeAfterRun({
-        generationId,
-        ownerName: cleanString(body.applierName),
-        sections: result.sections,
-        identity: body.identity,
-        jobDescription: cleanString(body.jobDescription),
-        templateId: body.templateId ?? null,
-      });
-    } catch (syncErr) {
-      console.warn("[resume-generate] library sync failed:", syncErr.message);
-    }
-    return res.json({ success: true, provider: prep.providerId, model: prep.model, ...result });
+    const finalized = await finalizeGenerationRun({ prep, body, result, startedAt });
+    return res.json({ success: true, provider: prep.providerId, model: prep.model, ...finalized });
   } catch (err) {
     const status = Number.isInteger(err?.status) ? err.status : 500;
     const friendly = status === 429 ? `${err.message} — rate limited; wait a few seconds and try again.` : err.message;
@@ -322,33 +382,22 @@ export async function generateResumeStream(req, res) {
       { ...prep, systemInstruction: body.systemInstruction, identity: body.identity, applierName: body.applierName, jobDescription: body.jobDescription, reasoningEffort: body.reasoningEffort },
       (evt) => send("step", evt),
     );
-    const generationId = await saveGenerationRun({
-      applierName: cleanString(body.applierName) || null,
+    const finalized = await finalizeGenerationRun({
+      prep,
+      body,
+      result,
+      startedAt,
+      onStep: (evt) => send("step", evt),
+    });
+    send("done", {
       provider: prep.providerId,
       model: prep.model,
-      status: "completed",
-      config: configSnapshot(body),
-      identity: body.identity ?? null,
-      jobDescription: cleanString(body.jobDescription) || null,
-      sections: result.sections,
-      perStep: result.perStep,
-      usage: result.usage,
-      startedAt,
-      finishedAt: new Date(),
+      sections: finalized.sections,
+      usage: finalized.usage,
+      skillProfile: finalized.skillProfile,
+      techStack: finalized.techStack,
+      skillAnalysisError: finalized.skillAnalysisError,
     });
-    try {
-      await syncGeneratedResumeAfterRun({
-        generationId,
-        ownerName: cleanString(body.applierName),
-        sections: result.sections,
-        identity: body.identity,
-        jobDescription: cleanString(body.jobDescription),
-        templateId: body.templateId ?? null,
-      });
-    } catch (syncErr) {
-      console.warn("[resume-generate/stream] library sync failed:", syncErr.message);
-    }
-    send("done", { provider: prep.providerId, model: prep.model, sections: result.sections, usage: result.usage });
   } catch (err) {
     const status = Number.isInteger(err?.status) ? err.status : 500;
     const friendly = status === 429 ? `${err.message} — rate limited; wait a few seconds and try again.` : err.message;
@@ -618,5 +667,23 @@ export async function getGeneration(req, res) {
   } catch (err) {
     console.warn("GET /api/personal/resume-generations/:id error:", err.message);
     return res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/** DELETE /personal/resume-generations/:id?applierName= — remove run + linked library resume. */
+export async function deleteGeneration(req, res) {
+  try {
+    const applierName = cleanString(req.query?.applierName);
+    const id = cleanString(req.params?.id);
+    if (!id) return res.status(400).json({ success: false, error: "id is required" });
+    if (!applierName) return res.status(400).json({ success: false, error: "applierName is required" });
+
+    const result = await deleteGenerationRun(id, applierName);
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    const msg = err.message || "Delete failed";
+    const status = msg.includes("not found") ? 404 : 500;
+    console.warn("DELETE /api/personal/resume-generations/:id error:", msg);
+    return res.status(status).json({ success: false, error: msg });
   }
 }

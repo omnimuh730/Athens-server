@@ -19,7 +19,7 @@ export function parseSkillsSectionFromResume(text) {
 	if (start < 0) return [];
 
 	const tail = raw.slice(start);
-	const endRel = tail.search(/\nEducation\b/i);
+	const endRel = tail.search(/\n(?:Experience|Education)\b/i);
 	const section = endRel >= 0 ? tail.slice(0, endRel) : tail.slice(0, 5000);
 
 	const found = [];

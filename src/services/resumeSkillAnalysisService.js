@@ -8,6 +8,7 @@ import {
   rebuildProfileGraph,
 } from "./userKnowledgeGraph/index.js";
 import { mergeSkillProfiles } from "./resumeSkillMerge.js";
+import { parseSkillProfileJson } from "./resumeSkillProfile.js";
 import { syncEmbeddingsAfterResumeAnalysis } from "./embeddings/embeddingIngest.js";
 import { invalidateRecommendationCache } from "./recommendation/recommendationService.js";
 
@@ -26,37 +27,6 @@ async function findAccount(applierNameRaw) {
 function apiKeyFor(profile, providerId) {
   const provider = getProvider(providerId);
   return String(profile?.[provider.keyField] || "").trim();
-}
-
-function parseSkillProfileJson(content) {
-  const raw = String(content || "").trim();
-  const jsonMatch = raw.match(/\[[\s\S]*\]/);
-  const jsonStr = jsonMatch ? jsonMatch[0] : raw;
-  let parsed;
-  try {
-    parsed = JSON.parse(jsonStr);
-  } catch {
-    throw new Error("LLM returned invalid JSON for skill profile");
-  }
-  if (!Array.isArray(parsed)) throw new Error("LLM skill profile must be a JSON array");
-
-  const out = [];
-  const seen = new Set();
-  for (const item of parsed) {
-    const name = String(item?.name ?? item?.skill ?? "").trim();
-    if (!name) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    let strength = Number(item?.strength ?? item?.score ?? 0);
-    if (!Number.isFinite(strength)) strength = 5;
-    strength = Math.max(0, Math.min(10, strength));
-    if (strength <= 0) continue;
-    out.push({ name, strength });
-  }
-
-  if (!out.length) throw new Error("LLM returned no usable skills");
-  return out;
 }
 
 async function extractSkillsWithLlm(extractedText, profile) {
@@ -122,7 +92,7 @@ export async function analyzeResumeSkills(resumeId, ownerName, { force = false }
   const doc = await loadResumeDoc(resumeId, ownerName);
   const resumeIdStr = String(doc._id);
 
-  if (doc.source === "generated" && doc.analyzed && Array.isArray(doc.skillProfile) && doc.skillProfile.length) {
+  if (doc.source === "generated" && doc.analyzed && Array.isArray(doc.skillProfile) && doc.skillProfile.length && !force) {
     const graph = await buildUserGraphFromResume({
       applierName: ownerName,
       resumeId: resumeIdStr,

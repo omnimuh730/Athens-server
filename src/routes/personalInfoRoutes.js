@@ -18,9 +18,10 @@ import {
 	generateResumeStream,
 	getGeneratorConfig,
 	saveGeneratorConfig,
-	listGenerations,
-	getGeneration,
-	checkLlmKey,
+  listGenerations,
+  getGeneration,
+  deleteGeneration,
+  checkLlmKey,
 } from "../controllers/resumeGenController.js";
 import { renderResumePdf } from "../controllers/resumePdfController.js";
 import { renderResumeDocx } from "../controllers/resumeDocxController.js";
@@ -57,6 +58,7 @@ router.get('/personal/resume-generator/config', getGeneratorConfig);
 router.put('/personal/resume-generator/config', saveGeneratorConfig);
 router.get('/personal/resume-generations', listGenerations);
 router.get('/personal/resume-generations/:id', getGeneration);
+router.delete('/personal/resume-generations/:id', deleteGeneration);
 router.post('/personal/llm-key-check', checkLlmKey);
 router.post('/personal/resume-pdf', renderResumePdf);
 router.post('/personal/resume-docx', renderResumeDocx);

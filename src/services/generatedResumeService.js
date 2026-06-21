@@ -1,6 +1,7 @@
 import { ObjectId } from "mongodb";
 import { userResumesCollection, accountInfoCollection, resumeGenerationsCollection } from "../db/mongo.js";
-import { mergeSkillProfiles } from "./resumeSkillMerge.js";
+import { deleteUserResume } from "./userResumeService.js";
+import { sectionsToText } from "./generatedResumeText.js";
 import {
   buildUserGraphFromResume,
   mergeSkillsIntoPersonalInfo,
@@ -11,71 +12,6 @@ import { invalidateRecommendationCache } from "./recommendation/recommendationSe
 
 function cleanString(v) {
   return String(v ?? "").trim();
-}
-
-function sectionsToText(sections, identity) {
-  const parts = [];
-  const summary = sections?.summary?.summary ?? sections?.summary;
-  if (typeof summary === "string" && summary.trim()) parts.push(summary.trim());
-
-  const groups = sections?.skills?.skills;
-  if (Array.isArray(groups)) {
-    const skillLines = groups
-      .map((g) => {
-        const items = Array.isArray(g?.items) ? g.items.map(String).filter(Boolean) : [];
-        if (!items.length) return "";
-        const cat = cleanString(g?.category);
-        return cat ? `${cat}: ${items.join(", ")}` : items.join(", ");
-      })
-      .filter(Boolean);
-    if (skillLines.length) parts.push(`Skills\n${skillLines.join("\n")}`);
-  }
-
-  const exps = sections?.experience?.experiences ?? sections?.experience?.experience;
-  if (Array.isArray(exps)) {
-    const expLines = exps.map((e) => {
-      const title = cleanString(e?.title);
-      const company = cleanString(e?.company);
-      const period = cleanString(e?.period);
-      const bullets = Array.isArray(e?.bullets) ? e.bullets.map(String).filter(Boolean) : [];
-      return [title, company, period, ...bullets.map((b) => `- ${b}`)].filter(Boolean).join("\n");
-    });
-    if (expLines.length) parts.push(`Experience\n${expLines.join("\n\n")}`);
-  }
-
-  if (identity?.fullName) parts.unshift(identity.fullName);
-  return parts.join("\n\n");
-}
-
-function deriveTechStack(sections, jobDescription) {
-  const groups = sections?.skills?.skills;
-  if (Array.isArray(groups) && groups.length) {
-    const first = groups
-      .slice(0, 2)
-      .map((g) => cleanString(g?.category))
-      .filter(Boolean);
-    if (first.length) return first.join(" + ");
-  }
-  const jd = cleanString(jobDescription);
-  if (jd.length > 60) return `${jd.slice(0, 57)}…`;
-  return jd || "Generated";
-}
-
-/** Build a skill profile from LLM-generated sections — no extra LLM call. */
-export function extractSkillProfileFromSections(sections, identity) {
-  const text = sectionsToText(sections, identity);
-  const raw = [];
-  const groups = sections?.skills?.skills;
-  if (Array.isArray(groups)) {
-    for (const g of groups) {
-      const items = Array.isArray(g?.items) ? g.items : [];
-      for (const item of items) {
-        const name = cleanString(item);
-        if (name) raw.push({ name, strength: 7.5 });
-      }
-    }
-  }
-  return mergeSkillProfiles(raw, text);
 }
 
 async function findOwnerId(ownerName) {
@@ -91,8 +27,8 @@ async function findOwnerId(ownerName) {
 }
 
 /**
- * After a successful generation run, persist skill analysis derived from LLM
- * output (no re-analysis) and register the resume in the user library.
+ * After a successful generation run, persist LLM skill analysis and register
+ * the resume in the user library.
  */
 export async function syncGeneratedResumeAfterRun({
   generationId,
@@ -101,27 +37,31 @@ export async function syncGeneratedResumeAfterRun({
   identity,
   jobDescription,
   templateId,
+  skillProfile,
+  techStack,
+  skillAnalysisError,
 }) {
   if (!userResumesCollection || !sections || !ownerName) return null;
 
-  const skillProfile = extractSkillProfileFromSections(sections, identity);
+  const profile = Array.isArray(skillProfile) ? skillProfile : [];
+  const stackLabel = cleanString(techStack) || "Generated";
   const extractedText = sectionsToText(sections, identity);
-  const techStack = deriveTechStack(sections, jobDescription);
   const fullName = cleanString(identity?.fullName) || "Resume";
   const now = new Date().toISOString();
   const fileName = `${fullName.replace(/\s+/g, "_")}_generated_${Date.now()}.txt`;
+  const analyzed = profile.length > 0;
 
   const ownerId = await findOwnerId(ownerName);
   if (!ownerId) {
     console.warn("[generatedResumeService] ownerId not found for", ownerName);
-    return { skillProfile, skippedLibrary: true };
+    return { skillProfile: profile, skippedLibrary: true };
   }
 
   const buffer = Buffer.from(extractedText || "Generated resume", "utf8");
   const doc = {
     ownerId,
     ownerName,
-    techStack,
+    techStack: stackLabel,
     fileName,
     mimeType: "text/plain",
     sizeBytes: buffer.length,
@@ -133,10 +73,10 @@ export async function syncGeneratedResumeAfterRun({
     generationId: generationId ? String(generationId) : null,
     templateId: templateId ?? null,
     isPrimary: false,
-    analyzed: true,
-    analyzedAt: now,
-    skillProfile,
-    analysisError: null,
+    analyzed,
+    analyzedAt: analyzed ? now : null,
+    skillProfile: profile,
+    analysisError: skillAnalysisError ?? null,
     uploadedAt: now,
     updatedAt: now,
   };
@@ -152,12 +92,13 @@ export async function syncGeneratedResumeAfterRun({
         { _id: existing._id },
         {
           $set: {
-            techStack,
+            techStack: stackLabel,
             fileName,
             extractedText,
-            skillProfile,
-            analyzed: true,
-            analyzedAt: now,
+            skillProfile: profile,
+            analyzed,
+            analyzedAt: analyzed ? now : null,
+            analysisError: skillAnalysisError ?? null,
             templateId: templateId ?? null,
             updatedAt: now,
             contentBase64: doc.contentBase64,
@@ -181,25 +122,71 @@ export async function syncGeneratedResumeAfterRun({
       { _id: new ObjectId(String(generationId)) },
       {
         $set: {
-          skillProfile,
-          analyzed: true,
-          analyzedAt: now,
+          skillProfile: profile,
+          techStack: stackLabel,
+          analyzed,
+          analyzedAt: analyzed ? now : null,
+          skillAnalysisError: skillAnalysisError ?? null,
           libraryResumeId: resumeIdStr,
         },
       },
     );
   }
 
-  await buildUserGraphFromResume({
-    applierName: ownerName,
-    resumeId: resumeIdStr,
-    resumeName: fileName,
-    skills: skillProfile,
-  });
-  await mergeSkillsIntoPersonalInfo(skillProfile.map((s) => s.name));
-  await rebuildProfileGraph(ownerName);
-  await syncEmbeddingsAfterResumeAnalysis(resumeIdStr, ownerName, { applierName: ownerName });
-  invalidateRecommendationCache(ownerName);
+  if (profile.length) {
+    await buildUserGraphFromResume({
+      applierName: ownerName,
+      resumeId: resumeIdStr,
+      resumeName: fileName,
+      skills: profile,
+    });
+    await mergeSkillsIntoPersonalInfo(profile.map((s) => s.name));
+    await rebuildProfileGraph(ownerName);
+    await syncEmbeddingsAfterResumeAnalysis(resumeIdStr, ownerName, { applierName: ownerName });
+    invalidateRecommendationCache(ownerName);
+  }
 
-  return { skillProfile, resumeId: resumeIdStr, fileName };
+  return { skillProfile: profile, techStack: stackLabel, resumeId: resumeIdStr, fileName };
 }
+
+/** Delete a generation run and its linked generated library resume (if any). */
+export async function deleteGenerationRun(id, ownerName) {
+  if (!resumeGenerationsCollection) throw new Error("Database not ready");
+  const name = cleanString(ownerName);
+  if (!name) throw new Error("applierName is required");
+
+  let _id;
+  try {
+    _id = new ObjectId(id);
+  } catch {
+    throw new Error("Invalid generation id");
+  }
+
+  const run = await resumeGenerationsCollection.findOne({ _id, applierName: name });
+  if (!run) throw new Error("Generation run not found");
+
+  let resumeDeleted = false;
+  const resumeId = cleanString(run.libraryResumeId);
+  if (resumeId) {
+    try {
+      await deleteUserResume(resumeId, name);
+      resumeDeleted = true;
+    } catch (err) {
+      if (!String(err?.message || "").toLowerCase().includes("not found")) throw err;
+    }
+  } else if (userResumesCollection) {
+    const linked = await userResumesCollection.findOne({
+      ownerName: name,
+      generationId: String(_id),
+    });
+    if (linked) {
+      await deleteUserResume(String(linked._id), name);
+      resumeDeleted = true;
+    }
+  }
+
+  await resumeGenerationsCollection.deleteOne({ _id, applierName: name });
+  return { deleted: true, generationId: String(_id), resumeDeleted };
+}
+
+export { sectionsToText };
