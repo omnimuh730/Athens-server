@@ -20,7 +20,7 @@ let skillEnrichmentQueueCollection;
 let skillCooccurrenceCollection;
 let userKnowledgeGraphsCollection;
 // Resume generator: saved config per applier + a history of generation runs.
-// Always local (AIMS_local) — this is the user's working data.
+// Always local (AthensDB) — this is the user's working data.
 let resumeGeneratorConfigCollection;
 let resumeGenerationsCollection;
 let mailMessagesCollection;
@@ -85,7 +85,14 @@ async function initMongo() {
 			'MONGO_URL is not set. Copy .env.example to .env and set MONGO_URL (e.g. mongodb://127.0.0.1:27017).'
 		);
 	}
-	const mongoDbName = process.env.MONGO_DB || 'AIMS_local';
+	const mongoDbName = process.env.MONGO_DB;
+
+	if(!mongoDbName) {
+		throw new Error(
+			'MONGO_DB is not set. Copy .env.example to .env and set MONGO_DB (e.g. AthensDB).'
+		);
+	}
+
 	mongoClient = new MongoClient(mongoUrl);
 	await mongoClient.connect();
 	const db = mongoClient.db(mongoDbName);

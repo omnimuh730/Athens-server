@@ -12,7 +12,13 @@ import { initNeo4j, runWrite, closeNeo4j } from '../db/neo4j.js';
  */
 async function main() {
 	const mongoUrl = process.env.MONGO_URL || 'mongodb://127.0.0.1:27017';
-	const dbName = process.env.MONGO_DB || 'AIMS_local';
+	const dbName = process.env.MONGO_DB;
+
+	if(!dbName) {
+		throw new Error(
+			'MONGO_DB is not set. Copy .env.example to .env and set MONGO_DB (e.g. AthensDB).'
+		);
+	}
 
 	const client = new MongoClient(mongoUrl);
 	await client.connect();

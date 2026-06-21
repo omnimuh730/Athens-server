@@ -10,7 +10,11 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 async function migrate() {
 	const mongoUrl = process.env.MONGO_URL;
-	const mongoDbName = process.env.MONGO_DB || 'AIMS_local';
+	if(mongoDbName) {
+		console.log('MongoDB database name is set to ', mongoDbName);
+	} else {
+		console.log('MongoDB database name is not set, using default database name');
+	}
 	const client = new MongoClient(mongoUrl);
 
 	try {
