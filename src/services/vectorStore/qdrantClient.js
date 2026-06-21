@@ -19,6 +19,7 @@ function getClient() {
 		client = new QdrantClient({
 			url: process.env.QDRANT_URL,
 			apiKey: process.env.QDRANT_API_KEY || undefined,
+			checkCompatibility: false,
 		});
 	}
 	return client;
@@ -57,7 +58,12 @@ export async function initQdrantCollections() {
 		console.log('[qdrant] collections ready');
 		return true;
 	} catch (err) {
-		console.error('[qdrant] init failed:', err.message);
+		const url = process.env.QDRANT_URL || '(not set)';
+		console.error(
+			`[qdrant] init failed: ${err.message}. `
+			+ `Is Qdrant running at ${url}? Try: npm run qdrant:start (macOS, no Docker) `
+			+ `or: cd Athens-server && docker compose up -d qdrant`,
+		);
 		return false;
 	}
 }
