@@ -70,7 +70,7 @@ async function buildResumeVectorEntries(resumes, applierName) {
 			const text = buildResumeEmbeddingText(doc);
 			if (text) {
 				try {
-					const result = await embedText(text, { applierName });
+					const result = await embedText(text, { applierName, role: 'query' });
 					vector = result.vector;
 				} catch (err) {
 					console.warn(`[recommendation] embed resume ${resumeId}:`, err.message);

@@ -7,5 +7,15 @@ services:
     volumes:
       - qdrant_storage:/qdrant/storage
 
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_storage:/root/.ollama
+    # After first start, pull the embedding model:
+    #   docker compose exec ollama ollama pull mxbai-embed-large
+
 volumes:
   qdrant_storage:
+  ollama_storage:

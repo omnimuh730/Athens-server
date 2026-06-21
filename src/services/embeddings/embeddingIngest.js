@@ -27,7 +27,7 @@ export async function upsertJobEmbedding(jobId, { applierName } = {}) {
 	if (!text) return { skipped: true, reason: 'empty_text' };
 
 	try {
-		const { vector, textHash, model } = await embedText(text, { applierName });
+		const { vector, textHash, model } = await embedText(text, { applierName, role: 'document' });
 		await upsertJobVector(String(job._id), vector, {
 			title: job.title || '',
 			skills: (job.skills || []).slice(0, 50),
@@ -38,7 +38,7 @@ export async function upsertJobEmbedding(jobId, { applierName } = {}) {
 			{
 				$set: {
 					embedding: {
-						model: model || process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
+						model: model || process.env.EMBEDDING_MODEL || 'mxbai-embed-large',
 						updatedAt: new Date().toISOString(),
 						textHash,
 					},
@@ -71,7 +71,10 @@ export async function upsertResumeEmbedding(resumeId, ownerName, { applierName }
 	if (!text) return { skipped: true, reason: 'empty_text' };
 
 	try {
-		const { vector, textHash, model } = await embedText(text, { applierName: applierName || name });
+		const { vector, textHash, model } = await embedText(text, {
+			applierName: applierName || name,
+			role: 'query',
+		});
 		await upsertResumeVector(String(doc._id), vector, {
 			ownerName: name,
 			techStack: doc.techStack || '',
@@ -83,7 +86,7 @@ export async function upsertResumeEmbedding(resumeId, ownerName, { applierName }
 			{
 				$set: {
 					embedding: {
-						model: model || process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
+						model: model || process.env.EMBEDDING_MODEL || 'mxbai-embed-large',
 						updatedAt: new Date().toISOString(),
 						textHash,
 					},

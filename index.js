@@ -10,6 +10,7 @@ import { initNeo4j } from "./src/db/neo4j.js";
 import { initSocket } from "./src/socketHub.js";
 import { startJobAnalysisWorker } from "./src/services/jobAnalysis/index.js";
 import { initQdrantCollections } from "./src/services/vectorStore/qdrantClient.js";
+import { checkOllamaEmbeddingReady } from "./src/services/embeddings/embeddingService.js";
 
 import openTabsRoutes from "./src/routes/openTabsRoutes.js";
 import jobRoutes from "./src/routes/jobRoutes.js";
@@ -53,6 +54,12 @@ async function bootstrap() {
 		await initQdrantCollections();
 	} catch (err) {
 		console.error('Qdrant init failed — vector recommendations disabled:', err.message);
+	}
+	const ollamaCheck = await checkOllamaEmbeddingReady();
+	if (!ollamaCheck.ok) {
+		console.warn('[embeddings] Ollama not ready:', ollamaCheck.error);
+	} else if (ollamaCheck.model) {
+		console.log(`[embeddings] Ollama ready — model ${ollamaCheck.model}`);
 	}
 }
 

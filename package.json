@@ -10,6 +10,7 @@
 		"migrate-passwords": "node src/db/migratePasswords.js",
 		"backfill-job-embeddings": "node src/scripts/backfillJobEmbeddings.js",
 		"backfill-resume-embeddings": "node src/scripts/backfillResumeEmbeddings.js",
+		"ollama-pull-embed": "ollama pull mxbai-embed-large",
 		"reset-skill-graph": "node src/scripts/resetSkillGraph.js"
 	},
 	"dependencies": {
