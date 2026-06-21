@@ -31,6 +31,7 @@ import {
 	bulkCreateUserResumesHandler,
 	setPrimaryUserResumeHandler,
 	deleteUserResumeHandler,
+	analyzeUserResumeHandler,
 } from "../controllers/userResumeController.js";
 import { analyzeResumeMatch } from "../controllers/resumeAnalysisController.js";
 
@@ -65,6 +66,7 @@ router.get('/personal/user-resumes/:id', getUserResumeHandler);
 router.post('/personal/user-resumes', createUserResumeHandler);
 router.post('/personal/user-resumes/bulk', bulkCreateUserResumesHandler);
 router.put('/personal/user-resumes/:id/primary', setPrimaryUserResumeHandler);
+router.post('/personal/user-resumes/:id/analyze', analyzeUserResumeHandler);
 router.delete('/personal/user-resumes/:id', deleteUserResumeHandler);
 router.post('/personal/resume-analysis', analyzeResumeMatch);
 

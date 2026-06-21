@@ -71,6 +71,7 @@ async function ensureSkillCollectionsIndexes() {
 	if (userResumesCollection) {
 		await userResumesCollection.createIndex({ ownerId: 1, techStack: 1 });
 		await userResumesCollection.createIndex({ ownerName: 1, uploadedAt: -1 });
+		await userResumesCollection.createIndex({ ownerName: 1, analyzed: 1 });
 	}
 	if (jobsCollection) {
 		await jobsCollection.createIndex({ 'skillAnalysis.status': 1, 'skillAnalysis.queuedAt': 1 });

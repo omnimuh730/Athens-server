@@ -6,6 +6,7 @@ import {
   setPrimaryUserResume,
   deleteUserResume,
 } from "../services/userResumeService.js";
+import { analyzeResumeSkills } from "../services/resumeSkillAnalysisService.js";
 
 export async function listUserResumesHandler(req, res) {
   try {
@@ -93,6 +94,25 @@ export async function deleteUserResumeHandler(req, res) {
   } catch (err) {
     console.error("DELETE /api/personal/user-resumes/:id error", err);
     const status = /not found/i.test(err.message) ? 404 : 500;
+    return res.status(status).json({ success: false, error: err.message });
+  }
+}
+
+export async function analyzeUserResumeHandler(req, res) {
+  try {
+    const ownerName = String(req.body?.ownerName ?? "").trim();
+    const force = Boolean(req.body?.force);
+    if (!ownerName) {
+      return res.status(400).json({ success: false, error: "ownerName is required" });
+    }
+
+    const result = await analyzeResumeSkills(req.params.id, ownerName, { force });
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    console.error("POST /api/personal/user-resumes/:id/analyze error", err);
+    const status = /not found|required|Invalid|No LLM|no extractable|invalid JSON|no usable/i.test(err.message)
+      ? 400
+      : 500;
     return res.status(status).json({ success: false, error: err.message });
   }
 }

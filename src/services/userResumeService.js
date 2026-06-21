@@ -1,5 +1,6 @@
 import { ObjectId, GridFSBucket } from "mongodb";
-import { userResumesCollection } from "../db/mongo.js";
+import { userResumesCollection, userKnowledgeGraphsCollection } from "../db/mongo.js";
+import { rebuildProfileGraph } from "./userKnowledgeGraph/index.js";
 
 const INLINE_MAX_BYTES = 8 * 1024 * 1024; // 8MB
 
@@ -15,6 +16,7 @@ function cleanString(v) {
 }
 
 function toSummary(doc) {
+  const skillProfile = Array.isArray(doc.skillProfile) ? doc.skillProfile : [];
   return {
     id: String(doc._id),
     ownerId: doc.ownerId ? String(doc.ownerId) : null,
@@ -25,6 +27,9 @@ function toSummary(doc) {
     sizeBytes: doc.sizeBytes ?? 0,
     extractedText: doc.extractedText ? doc.extractedText.slice(0, 500) : "",
     isPrimary: Boolean(doc.isPrimary),
+    analyzed: Boolean(doc.analyzed),
+    analyzedAt: doc.analyzedAt || null,
+    skillCount: skillProfile.length,
     uploadedAt: doc.uploadedAt,
     updatedAt: doc.updatedAt,
   };
@@ -262,6 +267,14 @@ export async function deleteUserResume(id, ownerName) {
 
   await deleteStoredContent(doc);
   await userResumesCollection.deleteOne({ _id: objectId });
+
+  if (userKnowledgeGraphsCollection) {
+    await userKnowledgeGraphsCollection.deleteOne({
+      applierName: name,
+      resumeId: String(objectId),
+    });
+    await rebuildProfileGraph(name);
+  }
 
   if (doc.isPrimary) {
     const next = await userResumesCollection.findOne({ ownerName: name }, { sort: { uploadedAt: -1 } });
