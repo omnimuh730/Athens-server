@@ -116,7 +116,7 @@ export function envelopeToArray(envelopeField) {
 	}));
 }
 
-export function messageToDoc(message, applierName) {
+export function messageToDoc(message, applierName, mailbox = ALL_MAIL_PATH) {
 	const from = envelopeFrom(message);
 	const gmailLabels = gmailLabelsToArray(message.labels);
 	const customLabels = extractCustomLabels(gmailLabels);
@@ -128,6 +128,7 @@ export function messageToDoc(message, applierName) {
 
 	return {
 		applierName,
+		mailbox,
 		uid: message.uid,
 		messageId: message.envelope?.messageId || null,
 		from,

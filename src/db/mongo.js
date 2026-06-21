@@ -29,7 +29,16 @@ let mailUserLabelsCollection;
 
 async function ensureMailCollectionsIndexes() {
 	if (mailMessagesCollection) {
-		await mailMessagesCollection.createIndex({ applierName: 1, uid: 1 }, { unique: true });
+		// UID is unique per IMAP mailbox, not globally — include mailbox in the key.
+		try {
+			await mailMessagesCollection.dropIndex('applierName_1_uid_1');
+		} catch {
+			// Index may not exist on fresh DBs.
+		}
+		await mailMessagesCollection.createIndex(
+			{ applierName: 1, mailbox: 1, uid: 1 },
+			{ unique: true },
+		);
 		await mailMessagesCollection.createIndex({ applierName: 1, date: -1 });
 		await mailMessagesCollection.createIndex({ applierName: 1, folder: 1, date: -1 });
 	}

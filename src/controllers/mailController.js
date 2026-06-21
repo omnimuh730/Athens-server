@@ -26,7 +26,9 @@ import {
 	loadLabelOrSearchPage,
 	getFolderCounts,
 	prefetchMessageBodies,
+	folderToMailbox,
 } from '../services/mail/mailSyncService.js';
+import { ALL_MAIL_PATH } from '../services/mail/folderMapper.js';
 
 function parsePageQuery(req) {
 	const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
@@ -76,7 +78,8 @@ export async function getMailThreads(req, res) {
 
 		if (!cacheOnly) {
 			const uids = result.threads.map((t) => Number(t.uid)).filter(Boolean);
-			void prefetchMessageBodies(applierName, uids);
+			const mailbox = folderToMailbox(folder);
+			void prefetchMessageBodies(applierName, uids, mailbox);
 		}
 
 		return res.json({
@@ -120,16 +123,17 @@ export async function getMailMessage(req, res) {
 			return res.status(400).json({ success: false, error: 'Invalid message uid' });
 		}
 
-		let doc = await getMessage(applierName, uid);
+		const folder = req.query.folder ? String(req.query.folder) : 'inbox';
+		const mailbox = folderToMailbox(folder);
+
+		let doc = await getMessage(applierName, uid, mailbox);
 		if (!doc) {
 			return res.status(404).json({ success: false, error: 'Message not found' });
 		}
 
-		if (!doc.hasBody) {
-			const bodyResult = await ensureMessageBody(applierName, uid);
-			if (bodyResult.ok && bodyResult.message) {
-				doc = bodyResult.message;
-			}
+		const bodyResult = await ensureMessageBody(applierName, uid, doc.mailbox || mailbox);
+		if (bodyResult.ok && bodyResult.message) {
+			doc = bodyResult.message;
 		}
 
 		return res.json({ success: true, thread: messageToThread(doc) });
@@ -229,7 +233,12 @@ export async function sendMailMessage(req, res) {
 		let inReplyTo;
 		let references;
 		if (replyToUid) {
-			const original = await getMessage(applierName, Number(replyToUid));
+			const replyFolder = req.body?.sourceFolder ? String(req.body.sourceFolder) : 'inbox';
+			const original = await getMessage(
+				applierName,
+				Number(replyToUid),
+				folderToMailbox(replyFolder),
+			);
 			if (original?.messageId) {
 				inReplyTo = original.messageId;
 				references = original.messageId;
@@ -268,33 +277,35 @@ export async function patchMailMessage(req, res) {
 			return res.status(400).json({ success: false, error: 'Invalid message uid' });
 		}
 
-		const { seen, flagged, folder, addLabels, removeLabels } = req.body || {};
-		const doc = await getMessage(applierName, uid);
+		const { seen, flagged, folder, addLabels, removeLabels, sourceFolder } = req.body || {};
+		const lookupFolder = sourceFolder ? String(sourceFolder) : folder ? String(folder) : 'inbox';
+		let doc = await getMessage(applierName, uid, folderToMailbox(lookupFolder));
 		if (!doc) {
 			return res.status(404).json({ success: false, error: 'Message not found' });
 		}
 
+		const mailbox = doc.mailbox || ALL_MAIL_PATH;
 		const patch = {};
 
 		if (seen !== undefined) {
-			await setMessageSeen(creds.email, creds.password, uid, Boolean(seen));
+			await setMessageSeen(creds.email, creds.password, uid, Boolean(seen), mailbox);
 			patch.flags = { ...doc.flags, seen: Boolean(seen) };
 		}
 
 		if (flagged !== undefined) {
-			await setMessageFlagged(creds.email, creds.password, uid, Boolean(flagged));
+			await setMessageFlagged(creds.email, creds.password, uid, Boolean(flagged), mailbox);
 			patch.flags = { ...(patch.flags || doc.flags), flagged: Boolean(flagged) };
 		}
 
 		if (addLabels?.length || removeLabels?.length) {
 			if (addLabels?.length) {
-				await addLabelsToMessage(creds.email, creds.password, uid, addLabels);
+				await addLabelsToMessage(creds.email, creds.password, uid, addLabels, mailbox);
 			}
 			if (removeLabels?.length) {
-				await removeLabelsFromMessage(creds.email, creds.password, uid, removeLabels);
+				await removeLabelsFromMessage(creds.email, creds.password, uid, removeLabels, mailbox);
 			}
 			const { fetchFlagsForUids } = await import('../services/mail/imapClient.js');
-			const refreshed = await fetchFlagsForUids(creds.email, creds.password, [uid], applierName);
+			const refreshed = await fetchFlagsForUids(creds.email, creds.password, [uid], applierName, mailbox);
 			if (refreshed[0]) {
 				patch.gmailLabels = refreshed[0].gmailLabels;
 				patch.labels = refreshed[0].labels;
@@ -305,20 +316,20 @@ export async function patchMailMessage(req, res) {
 
 		if (folder !== undefined) {
 			if (folder === 'archive') {
-				await archiveMessage(creds.email, creds.password, uid);
+				await archiveMessage(creds.email, creds.password, uid, mailbox);
 				patch.folder = 'archive';
 			} else if (folder === 'trash') {
-				await trashMessage(creds.email, creds.password, uid);
+				await trashMessage(creds.email, creds.password, uid, mailbox);
 				patch.folder = 'trash';
 			} else if (folder === 'inbox') {
-				await moveToInbox(creds.email, creds.password, uid);
+				await moveToInbox(creds.email, creds.password, uid, mailbox);
 				patch.folder = 'inbox';
 			} else {
 				patch.folder = folder;
 			}
 		}
 
-		const updated = await updateMessageFlags(applierName, uid, patch);
+		const updated = await updateMessageFlags(applierName, uid, patch, mailbox);
 		return res.json({ success: true, thread: messageToThread(updated) });
 	} catch (err) {
 		console.error('PATCH /api/mail/messages/:uid error', err);

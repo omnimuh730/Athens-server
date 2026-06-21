@@ -2,7 +2,7 @@ import {
 	mailMessagesCollection,
 	mailSyncStateCollection,
 } from '../../db/mongo.js';
-import { extractCustomLabels } from './folderMapper.js';
+import { ALL_MAIL_PATH, extractCustomLabels } from './folderMapper.js';
 
 function getInitialSyncSize() {
 	return Number.parseInt(process.env.MAIL_INITIAL_SYNC_SIZE || '250', 10) || 250;
@@ -83,7 +83,8 @@ export async function canSync(applierName, force = false) {
 export async function upsertMessages(messages) {
 	if (!mailMessagesCollection || !messages.length) return { upserted: 0 };
 	const ops = messages.map((msg) => {
-		const setFields = { ...msg, syncedAt: new Date() };
+		const mailbox = msg.mailbox || ALL_MAIL_PATH;
+		const setFields = { ...msg, mailbox, syncedAt: new Date() };
 		// Preserve cached bodies when refreshing envelopes/flags only
 		if (!msg.hasBody) {
 			delete setFields.hasBody;
@@ -92,7 +93,7 @@ export async function upsertMessages(messages) {
 		}
 		return {
 			updateOne: {
-				filter: { applierName: msg.applierName, uid: msg.uid },
+				filter: { applierName: msg.applierName, mailbox, uid: msg.uid },
 				update: {
 					$set: setFields,
 					$setOnInsert: { hasBody: false, bodyText: '', bodyHtml: null },
@@ -105,23 +106,30 @@ export async function upsertMessages(messages) {
 	return { upserted: result.upsertedCount + result.modifiedCount };
 }
 
-export async function updateMessageFlags(applierName, uid, patch) {
+function messageFilter(applierName, uid, mailbox) {
+	const filter = { applierName, uid: Number(uid) };
+	if (mailbox) filter.mailbox = mailbox;
+	return filter;
+}
+
+export async function updateMessageFlags(applierName, uid, patch, mailbox = ALL_MAIL_PATH) {
 	if (!mailMessagesCollection) return null;
 	const result = await mailMessagesCollection.findOneAndUpdate(
-		{ applierName, uid: Number(uid) },
+		messageFilter(applierName, uid, mailbox),
 		{ $set: { ...patch, syncedAt: new Date() } },
 		{ returnDocument: 'after' },
 	);
 	return result;
 }
 
-export async function updateMessageBody(applierName, uid, bodyPatch) {
+export async function updateMessageBody(applierName, uid, bodyPatch, mailbox = ALL_MAIL_PATH) {
 	if (!mailMessagesCollection) return null;
 	return mailMessagesCollection.findOneAndUpdate(
-		{ applierName, uid: Number(uid) },
+		messageFilter(applierName, uid, mailbox),
 		{
 			$set: {
 				...bodyPatch,
+				mailbox,
 				hasBody: true,
 				syncedAt: new Date(),
 			},
@@ -130,32 +138,69 @@ export async function updateMessageBody(applierName, uid, bodyPatch) {
 	);
 }
 
-export async function getMessage(applierName, uid) {
+export async function clearMessageBody(applierName, uid, mailbox = ALL_MAIL_PATH) {
 	if (!mailMessagesCollection) return null;
-	return mailMessagesCollection.findOne({ applierName, uid: Number(uid) });
+	return mailMessagesCollection.findOneAndUpdate(
+		messageFilter(applierName, uid, mailbox),
+		{
+			$set: {
+				hasBody: false,
+				bodyText: '',
+				bodyHtml: null,
+				syncedAt: new Date(),
+			},
+		},
+		{ returnDocument: 'after' },
+	);
+}
+
+export async function getMessage(applierName, uid, mailbox) {
+	if (!mailMessagesCollection) return null;
+	if (mailbox) {
+		let doc = await mailMessagesCollection.findOne(messageFilter(applierName, uid, mailbox));
+		if (!doc) {
+			// Legacy rows keyed only by uid (pre-mailbox migration)
+			doc = await mailMessagesCollection.findOne({
+				applierName,
+				uid: Number(uid),
+				$or: [{ mailbox: { $exists: false } }, { mailbox: null }, { mailbox: '' }],
+			});
+		}
+		return doc;
+	}
+	// Legacy fallback: prefer INBOX over All Mail when ambiguous
+	const docs = await mailMessagesCollection
+		.find({ applierName, uid: Number(uid) })
+		.sort({ syncedAt: -1 })
+		.limit(5)
+		.toArray();
+	if (docs.length === 1) return docs[0];
+	const inbox = docs.find((d) => d.mailbox === 'INBOX');
+	return inbox || docs[0] || null;
 }
 
 export async function listMessages(
 	applierName,
-	{ folder, label, search, page = 1, pageSize = 25, limit, beforeDate } = {},
+	{ folder, label, search, page = 1, pageSize = 25, limit, beforeDate, mailbox } = {},
 ) {
 	if (!mailMessagesCollection) return [];
 
-	const filter = buildMessageFilter(applierName, { folder, label, search, beforeDate });
+	const filter = buildMessageFilter(applierName, { folder, label, search, beforeDate, mailbox });
 	const size = Math.min(Math.max(limit ?? pageSize, 1), 100);
 	const skip = limit ? 0 : (Math.max(page, 1) - 1) * size;
 
 	return mailMessagesCollection.find(filter).sort({ date: -1 }).skip(skip).limit(size).toArray();
 }
 
-export async function countMessages(applierName, { folder, label, search, beforeDate } = {}) {
+export async function countMessages(applierName, { folder, label, search, beforeDate, mailbox } = {}) {
 	if (!mailMessagesCollection) return 0;
-	const filter = buildMessageFilter(applierName, { folder, label, search, beforeDate });
+	const filter = buildMessageFilter(applierName, { folder, label, search, beforeDate, mailbox });
 	return mailMessagesCollection.countDocuments(filter);
 }
 
-function buildMessageFilter(applierName, { folder, label, search, beforeDate } = {}) {
+function buildMessageFilter(applierName, { folder, label, search, beforeDate, mailbox } = {}) {
 	const filter = { applierName };
+	if (mailbox) filter.mailbox = mailbox;
 	if (folder) filter.folder = folder;
 	if (label) {
 		const escaped = String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -175,9 +220,13 @@ function buildMessageFilter(applierName, { folder, label, search, beforeDate } =
 	return filter;
 }
 
-export async function getCachedMessageCount(applierName, uids) {
+export async function getCachedMessageCount(applierName, uids, mailbox = ALL_MAIL_PATH) {
 	if (!mailMessagesCollection || !uids.length) return 0;
-	return mailMessagesCollection.countDocuments({ applierName, uid: { $in: uids } });
+	return mailMessagesCollection.countDocuments({
+		applierName,
+		mailbox,
+		uid: { $in: uids },
+	});
 }
 
 export async function getRecentUidsForFlagRefresh(applierName, days = 7) {
@@ -208,6 +257,7 @@ export function messageToThread(doc) {
 	return {
 		id: String(doc.uid),
 		uid: doc.uid,
+		mailbox: doc.mailbox || ALL_MAIL_PATH,
 		from: doc.from?.name
 			? doc.from.email
 				? doc.from.name

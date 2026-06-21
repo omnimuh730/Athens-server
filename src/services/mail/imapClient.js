@@ -119,7 +119,7 @@ export async function fetchRecentEnvelopes(email, password, count, applierName) 
 			uid: true,
 			labels: true,
 		})) {
-			messages.push(messageToDoc(message, applierName));
+			messages.push(messageToDoc(message, applierName, ALL_MAIL_PATH));
 		}
 
 		messages.reverse();
@@ -151,7 +151,7 @@ export async function fetchOlderEnvelopes(email, password, beforeUid, batchSize,
 			uid: true,
 			labels: true,
 		})) {
-			messages.push(messageToDoc(message, applierName));
+			messages.push(messageToDoc(message, applierName, ALL_MAIL_PATH));
 		}
 
 		messages.sort((a, b) => b.uid - a.uid);
@@ -181,7 +181,7 @@ export async function fetchNewEnvelopes(email, password, highestUid, applierName
 			uid: true,
 			labels: true,
 		})) {
-			messages.push(messageToDoc(message, applierName));
+			messages.push(messageToDoc(message, applierName, ALL_MAIL_PATH));
 		}
 
 		messages.sort((a, b) => b.uid - a.uid);
@@ -193,9 +193,9 @@ export async function fetchNewEnvelopes(email, password, highestUid, applierName
 /**
  * Re-fetch flags/labels for given UIDs (recent messages).
  */
-export async function fetchFlagsForUids(email, password, uids, applierName) {
+export async function fetchFlagsForUids(email, password, uids, applierName, mailboxPath = ALL_MAIL_PATH) {
 	if (!uids.length) return [];
-	return withMailbox(email, password, async (client) => {
+	return withMailboxPath(email, password, mailboxPath, async (client) => {
 		const updates = [];
 		for await (const message of client.fetch(uids, {
 			flags: true,
@@ -210,6 +210,7 @@ export async function fetchFlagsForUids(email, password, uids, applierName) {
 			const customLabels = extractCustomLabels(gmailLabels);
 			updates.push({
 				applierName,
+				mailbox: mailboxPath,
 				uid: message.uid,
 				flags: { seen, flagged },
 				gmailLabels,
@@ -222,8 +223,20 @@ export async function fetchFlagsForUids(email, password, uids, applierName) {
 	});
 }
 
-export async function fetchMessageBody(email, password, uid) {
-	return withMailbox(email, password, async (client) => {
+export async function fetchEnvelopeForUid(email, password, uid, applierName, mailboxPath = ALL_MAIL_PATH) {
+	return withMailboxPath(email, password, mailboxPath, async (client) => {
+		const message = await client.fetchOne(
+			String(uid),
+			{ envelope: true, flags: true, uid: true, labels: true },
+			{ uid: true },
+		);
+		if (!message) return null;
+		return messageToDoc(message, applierName, mailboxPath);
+	});
+}
+
+export async function fetchMessageBody(email, password, uid, mailboxPath = ALL_MAIL_PATH) {
+	return withMailboxPath(email, password, mailboxPath, async (client) => {
 		const message = await client.fetchOne(String(uid), { source: true, uid: true }, { uid: true });
 		if (!message?.source) {
 			throw new Error('Message not found');
@@ -243,6 +256,7 @@ export async function fetchMessageBody(email, password, uid) {
 
 		return {
 			uid,
+			messageId: parsed.messageId || null,
 			from: {
 				name: from?.name || from?.address || parsed.from?.text || 'Unknown',
 				email: from?.address || '',
@@ -260,8 +274,8 @@ export async function fetchMessageBody(email, password, uid) {
 	});
 }
 
-export async function setMessageSeen(email, password, uid, seen) {
-	return withMailbox(email, password, async (client) => {
+export async function setMessageSeen(email, password, uid, seen, mailboxPath = ALL_MAIL_PATH) {
+	return withMailboxPath(email, password, mailboxPath, async (client) => {
 		if (seen) {
 			await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
 		} else {
@@ -270,8 +284,8 @@ export async function setMessageSeen(email, password, uid, seen) {
 	});
 }
 
-export async function setMessageFlagged(email, password, uid, flagged) {
-	return withMailbox(email, password, async (client) => {
+export async function setMessageFlagged(email, password, uid, flagged, mailboxPath = ALL_MAIL_PATH) {
+	return withMailboxPath(email, password, mailboxPath, async (client) => {
 		if (flagged) {
 			await client.messageFlagsAdd(String(uid), ['\\Flagged'], { uid: true });
 		} else {
@@ -280,21 +294,21 @@ export async function setMessageFlagged(email, password, uid, flagged) {
 	});
 }
 
-export async function archiveMessage(email, password, uid) {
-	return withMailbox(email, password, async (client) => {
+export async function archiveMessage(email, password, uid, mailboxPath = ALL_MAIL_PATH) {
+	return withMailboxPath(email, password, mailboxPath, async (client) => {
 		await client.messageLabelsRemove(String(uid), ['\\Inbox'], { uid: true });
 	});
 }
 
-export async function trashMessage(email, password, uid) {
-	return withMailbox(email, password, async (client) => {
+export async function trashMessage(email, password, uid, mailboxPath = ALL_MAIL_PATH) {
+	return withMailboxPath(email, password, mailboxPath, async (client) => {
 		await client.messageLabelsAdd(String(uid), ['\\Trash'], { uid: true });
 		await client.messageLabelsRemove(String(uid), ['\\Inbox'], { uid: true });
 	});
 }
 
-export async function moveToInbox(email, password, uid) {
-	return withMailbox(email, password, async (client) => {
+export async function moveToInbox(email, password, uid, mailboxPath = ALL_MAIL_PATH) {
+	return withMailboxPath(email, password, mailboxPath, async (client) => {
 		await client.messageLabelsAdd(String(uid), ['\\Inbox'], { uid: true });
 		await client.messageLabelsRemove(String(uid), ['\\Trash'], { uid: true });
 	});
@@ -377,18 +391,18 @@ export async function deleteGmailLabel(email, password, labelPath) {
 	});
 }
 
-export async function addLabelsToMessage(email, password, uid, labelNames) {
+export async function addLabelsToMessage(email, password, uid, labelNames, mailboxPath = ALL_MAIL_PATH) {
 	const tokens = (labelNames || []).map(toImapLabelToken).filter(Boolean);
 	if (!tokens.length) return;
-	return withMailbox(email, password, async (client) => {
+	return withMailboxPath(email, password, mailboxPath, async (client) => {
 		await client.messageLabelsAdd(String(uid), tokens, { uid: true });
 	});
 }
 
-export async function removeLabelsFromMessage(email, password, uid, labelNames) {
+export async function removeLabelsFromMessage(email, password, uid, labelNames, mailboxPath = ALL_MAIL_PATH) {
 	const tokens = (labelNames || []).map(toImapLabelToken).filter(Boolean);
 	if (!tokens.length) return;
-	return withMailbox(email, password, async (client) => {
+	return withMailboxPath(email, password, mailboxPath, async (client) => {
 		await client.messageLabelsRemove(String(uid), tokens, { uid: true });
 	});
 }
@@ -414,12 +428,12 @@ export async function fetchMailboxPage(email, password, folder, page, pageSize, 
 			uid: true,
 			labels: true,
 		})) {
-			const doc = messageToDoc(message, applierName);
+			const doc = messageToDoc(message, applierName, mailboxPath);
 			doc.folder = folder;
 			messages.push(doc);
 		}
 		messages.reverse();
-		return { messages, total };
+		return { messages, total, mailbox: mailboxPath };
 	});
 }
 

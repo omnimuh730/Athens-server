@@ -2,6 +2,7 @@ import { resolveMailCredentials } from './credentials.js';
 import {
 	fetchFlagsForUids,
 	fetchMessageBody,
+	fetchEnvelopeForUid,
 	fetchMailboxPage,
 	fetchNewEnvelopes,
 	fetchFolderCounts,
@@ -16,21 +17,23 @@ import {
 	releaseSyncLock,
 	upsertMessages,
 	upsertSyncState,
-	getCachedMessageCount,
 	messageToThread,
+	clearMessageBody,
 } from './mailStore.js';
+import { ALL_MAIL_PATH, folderToMailbox } from './folderMapper.js';
 
 /**
  * Read one folder page from MongoDB cache only (instant).
  */
 export async function loadCachedFolderPage(applierName, folder, page, pageSize) {
+	const mailbox = folderToMailbox(folder);
 	const state = await getSyncState(applierName);
 	const cachedTotal = state?.[`folderTotal_${folder}`];
-	const mongoCount = await countMessages(applierName, { folder });
+	const mongoCount = await countMessages(applierName, { folder, mailbox });
 	const total =
 		typeof cachedTotal === 'number' && cachedTotal > 0 ? cachedTotal : mongoCount;
 
-	const docs = await listMessages(applierName, { folder, page, pageSize });
+	const docs = await listMessages(applierName, { folder, mailbox, page, pageSize });
 	return {
 		ok: true,
 		threads: docs.map(messageToThread),
@@ -59,11 +62,7 @@ export async function loadFolderPage(applierName, folder, page, pageSize) {
 		);
 
 		if (messages.length) {
-			const uids = messages.map((m) => m.uid);
-			const cached = await getCachedMessageCount(applierName, uids);
-			if (cached < uids.length) {
-				await upsertMessages(messages);
-			}
+			await upsertMessages(messages);
 		}
 
 		await upsertSyncState(applierName, {
@@ -149,6 +148,7 @@ export async function runIncrementalSync(applierName, { force = false } = {}) {
 				creds.password,
 				recentUids,
 				applierName,
+				ALL_MAIL_PATH,
 			);
 			if (flagUpdates.length) {
 				const result = await upsertMessages(flagUpdates);
@@ -181,18 +181,39 @@ export async function runOlderSync(applierName, batchSize) {
 	return { ok: true, newCount: 0, hasMore: false };
 }
 
-export async function ensureMessageBody(applierName, uid) {
+export async function ensureMessageBody(applierName, uid, mailbox) {
 	const creds = await resolveMailCredentials(applierName);
 	if (!creds.ok) return { ok: false, error: creds.error };
 
 	const { getMessage, updateMessageBody } = await import('./mailStore.js');
-	const existing = await getMessage(applierName, uid);
+	const mailboxPath = mailbox || ALL_MAIL_PATH;
+	let existing = await getMessage(applierName, uid, mailboxPath);
+
 	if (existing?.hasBody && existing.bodyHtml) {
-		return { ok: true, message: existing };
+		try {
+			const freshEnvelope = await fetchEnvelopeForUid(
+				creds.email,
+				creds.password,
+				uid,
+				applierName,
+				mailboxPath,
+			);
+			if (
+				freshEnvelope?.messageId &&
+				existing.messageId &&
+				freshEnvelope.messageId === existing.messageId
+			) {
+				return { ok: true, message: existing };
+			}
+		} catch {
+			// Re-fetch body below
+		}
+		await clearMessageBody(applierName, uid, mailboxPath);
+		existing = await getMessage(applierName, uid, mailboxPath);
 	}
 
 	try {
-		const body = await fetchMessageBody(creds.email, creds.password, uid);
+		const body = await fetchMessageBody(creds.email, creds.password, uid, mailboxPath);
 		const updated = await updateMessageBody(applierName, uid, {
 			bodyText: body.bodyText,
 			bodyHtml: body.bodyHtml,
@@ -203,7 +224,8 @@ export async function ensureMessageBody(applierName, uid) {
 			subject: body.subject,
 			date: body.date,
 			flags: body.flags,
-		});
+			messageId: body.messageId || existing?.messageId || null,
+		}, mailboxPath);
 		return { ok: true, message: updated };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
@@ -212,18 +234,20 @@ export async function ensureMessageBody(applierName, uid) {
 }
 
 /** Prefetch bodies for visible page (background). */
-export async function prefetchMessageBodies(applierName, uids) {
+export async function prefetchMessageBodies(applierName, uids, mailbox = ALL_MAIL_PATH) {
 	const creds = await resolveMailCredentials(applierName);
 	if (!creds.ok) return;
 
 	const { getMessage } = await import('./mailStore.js');
 	for (const uid of uids.slice(0, 10)) {
-		const existing = await getMessage(applierName, uid);
+		const existing = await getMessage(applierName, uid, mailbox);
 		if (existing?.hasBody) continue;
 		try {
-			await ensureMessageBody(applierName, uid);
+			await ensureMessageBody(applierName, uid, mailbox);
 		} catch {
 			// best effort
 		}
 	}
 }
+
+export { folderToMailbox };
