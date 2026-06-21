@@ -11,6 +11,7 @@ import {
 	removeJobsForRule,
 	analyzeJob,
 	getJobSkillAnalysis,
+	getJobById,
 } from "../controllers/jobController.js";
 
 const router = express.Router();
@@ -18,6 +19,7 @@ const router = express.Router();
 router.post('/jobs', createJob);
 router.post('/jobs/list', getJobs);
 router.post('/jobs/list/counts', getJobStatusCounts);
+router.get('/jobs/:id', getJobById);
 router.post('/jobs/:id/analyze', analyzeJob);
 router.get('/jobs/:id/skill-analysis', getJobSkillAnalysis);
 router.get('/jobs/rule/:name', getJobsForRule);

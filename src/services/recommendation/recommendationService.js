@@ -1,4 +1,3 @@
-import { ObjectId } from 'mongodb';
 import {
 	jobsCollection,
 	userKnowledgeGraphsCollection,
@@ -7,21 +6,24 @@ import {
 import { embedText } from '../embeddings/embeddingService.js';
 import { buildResumeEmbeddingText } from '../embeddings/embeddingText.js';
 import { getResumeVector, isQdrantReady } from '../vectorStore/qdrantClient.js';
-import { upsertResumeEmbedding, upsertProfileEmbedding, getProfileVector, PROFILE_GRAPH_ID } from '../embeddings/embeddingIngest.js';
-import { getCandidatePoolSize } from '../vectorStore/collections.js';
-import { retrieveJobCandidates } from './vectorRetrieval.js';
+import {
+	upsertResumeEmbedding,
+	upsertProfileEmbedding,
+	getProfileVector,
+	PROFILE_GRAPH_ID,
+} from '../embeddings/embeddingIngest.js';
+import { isNeo4jReady } from '../../db/neo4j.js';
 import { computeGraphBoost } from './graphRankBoost.js';
 import { applyScoreFilters, composeJobScores } from './scoreComposer.js';
+import { buildQdrantFilterFromBody } from './qdrantFilter.js';
+import { fetchVectorRankedPage } from './ringPagination.js';
+import { mergeMultiVectorScores } from './vectorRetrieval.js';
 
-const CACHE_TTL_MS = 3 * 60 * 1000;
-const scoreCache = new Map();
+const VECTOR_CACHE_TTL_MS = 3 * 60 * 1000;
+const vectorEntryCache = new Map();
 
-function cacheKey(applierName, queryHash) {
-	return `${applierName}::${queryHash}`;
-}
-
-function simpleQueryHash(query) {
-	return JSON.stringify(query);
+function vectorCacheKey(applierName) {
+	return String(applierName || '').trim();
 }
 
 async function loadAnalyzedResumes(applierName) {
@@ -95,7 +97,7 @@ async function buildResumeVectorEntries(resumes, applierName) {
 		}
 	}
 	if (profileVector?.length) {
-		withVectors.push({
+		withVectors.unshift({
 			resumeId: PROFILE_GRAPH_ID,
 			techStack: 'Profile',
 			vector: profileVector,
@@ -105,137 +107,80 @@ async function buildResumeVectorEntries(resumes, applierName) {
 	return withVectors;
 }
 
-async function scoreCandidates(candidateMap, applierName) {
-	const poolSize = getCandidatePoolSize();
-	const sorted = [...candidateMap.entries()]
-		.sort((a, b) => b[1].vectorScore - a[1].vectorScore)
-		.slice(0, poolSize);
+async function getCachedResumeVectors(applierName) {
+	const key = vectorCacheKey(applierName);
+	const cached = vectorEntryCache.get(key);
+	if (cached && cached.expiresAt > Date.now()) {
+		return cached.entries;
+	}
+	const entries = await buildResumeVectorEntries(await loadAnalyzedResumes(applierName), applierName);
+	vectorEntryCache.set(key, { entries, expiresAt: Date.now() + VECTOR_CACHE_TTL_MS });
+	return entries;
+}
 
-	const jobIds = sorted.map(([id]) => {
-		try {
-			return new ObjectId(id);
-		} catch {
-			return null;
-		}
-	}).filter(Boolean);
+/** Primary query vector for Qdrant pagination (profile preferred, else first resume). */
+function pickPrimaryQueryVector(resumeVectors) {
+	const profile = resumeVectors.find((e) => e.resumeId === PROFILE_GRAPH_ID);
+	if (profile?.vector?.length) return profile;
+	return resumeVectors.find((e) => e.vector?.length) || null;
+}
 
-	if (!jobIds.length || !jobsCollection) return { scored: [], poolIds: new Set() };
+async function applyGraphBoostToPage(pageRows, applierName) {
+	if (!isNeo4jReady() || !pageRows.length) {
+		return pageRows.map(({ job, vectorScore, bestResumeId, bestResumeTechStack }) => ({
+			...job,
+			...composeJobScores(job, { vectorScore, graphBoost: 0 }),
+			bestResumeId: bestResumeId || null,
+			bestResumeTechStack: bestResumeTechStack || null,
+			recommendationRanked: true,
+		}));
+	}
 
-	const jobs = await jobsCollection.find({ _id: { $in: jobIds } }).toArray();
-	const jobById = new Map(jobs.map((j) => [String(j._id), j]));
 	const graphCache = new Map();
-	const poolIds = new Set(sorted.map(([id]) => id));
-
 	const scored = [];
-	for (const [jobId, matchInfo] of sorted) {
-		const job = jobById.get(jobId);
-		if (!job) continue;
 
+	for (const row of pageRows) {
+		const { job, vectorScore, bestResumeId, bestResumeTechStack } = row;
 		let graphBoost = 0;
-		const graphKey = matchInfo.bestResumeId;
-		if (graphKey && userKnowledgeGraphsCollection) {
+		const graphKey = bestResumeId;
+		if (graphKey && graphKey !== PROFILE_GRAPH_ID && userKnowledgeGraphsCollection) {
 			if (!graphCache.has(graphKey)) {
 				const graph = await loadResumeGraph(graphKey, applierName);
 				graphCache.set(graphKey, graph?.skills || []);
 			}
-			const skills = graphCache.get(graphKey);
 			try {
-				graphBoost = await computeGraphBoost(job.skills || [], skills);
+				graphBoost = await computeGraphBoost(job.skills || [], graphCache.get(graphKey));
 			} catch (err) {
-				console.warn(`[recommendation] graph boost job ${jobId}:`, err.message);
+				console.warn(`[recommendation] graph boost job ${job._id}:`, err.message);
 			}
 		}
 
-		const scores = composeJobScores(job, {
-			vectorScore: matchInfo.vectorScore,
-			graphBoost,
-		});
-
 		scored.push({
 			...job,
-			...scores,
-			bestResumeId: matchInfo.bestResumeId,
-			bestResumeTechStack: matchInfo.bestResumeTechStack,
+			...composeJobScores(job, { vectorScore, graphBoost }),
+			bestResumeId: bestResumeId || null,
+			bestResumeTechStack: bestResumeTechStack || null,
 			recommendationRanked: true,
 		});
 	}
 
-	scored.sort((a, b) => b.scoreOverall - a.scoreOverall || String(b.postedAt).localeCompare(String(a.postedAt)));
-	return { scored, poolIds };
-}
-
-function poolIdsToObjectIds(poolIds) {
-	const ids = [];
-	for (const id of poolIds) {
-		try {
-			ids.push(new ObjectId(id));
-		} catch {
-			/* skip invalid */
-		}
-	}
-	return ids;
-}
-
-/** Jobs outside the vector pool — secondary scores only, sorted by posted date. */
-async function fetchTailJobs(mongoQuery, poolIds, skip, limit) {
-	if (!jobsCollection || limit <= 0) return [];
-
-	const excludeIds = poolIdsToObjectIds(poolIds);
-	const query = excludeIds.length
-		? { $and: [mongoQuery, { _id: { $nin: excludeIds } }] }
-		: mongoQuery;
-
-	const jobs = await jobsCollection
-		.find(query)
-		.sort({ postedAt: -1, _id: -1 })
-		.skip(skip)
-		.limit(limit)
-		.toArray();
-
-	return jobs.map((job) => ({
-		...job,
-		...composeJobScores(job, { vectorScore: 0, graphBoost: 0 }),
-		bestResumeId: null,
-		bestResumeTechStack: null,
-		recommendationRanked: false,
-	}));
-}
-
-async function paginateRecommendation(cached, skip, limit, scoreFilters) {
-	const ranked = applyScoreFilters(cached.ranked, scoreFilters);
-	const rankedLen = ranked.length;
-	const tailTotal = Math.max(0, cached.catalogTotal - cached.poolIds.size);
-	const total = rankedLen + tailTotal;
-
-	if (skip + limit <= rankedLen) {
-		return { docs: ranked.slice(skip, skip + limit), total, catalogTotal: cached.catalogTotal, recommendationFallback: false };
-	}
-
-	if (skip >= rankedLen) {
-		const tailSkip = skip - rankedLen;
-		const tail = await fetchTailJobs(cached.mongoQuery, cached.poolIds, tailSkip, limit);
-		const tailFiltered = applyScoreFilters(tail, scoreFilters);
-		return { docs: tailFiltered, total, catalogTotal: cached.catalogTotal, recommendationFallback: false };
-	}
-
-	const fromRanked = ranked.slice(skip);
-	const tail = await fetchTailJobs(cached.mongoQuery, cached.poolIds, 0, limit - fromRanked.length);
-	const tailFiltered = applyScoreFilters(tail, scoreFilters);
-	return {
-		docs: [...fromRanked, ...tailFiltered],
-		total,
-		catalogTotal: cached.catalogTotal,
-		recommendationFallback: false,
-	};
+	scored.sort(
+		(a, b) => b.scoreOverall - a.scoreOverall
+			|| String(b.postedAt).localeCompare(String(a.postedAt))
+			|| String(b._id).localeCompare(String(a._id)),
+	);
+	return scored;
 }
 
 /**
- * Recommend and rank jobs for an applier using multi-vector retrieval.
+ * Recommend and rank jobs for an applier using Qdrant ring pagination.
+ * O(pageSize) per request — no full-catalog scan or 500-job graph boost loop.
  */
 export async function recommendJobsForApplier({
 	applierName,
 	mongoQuery,
 	scoreFilters,
+	listBody,
 	skip = 0,
 	limit = 25,
 }) {
@@ -253,57 +198,56 @@ export async function recommendJobsForApplier({
 		return { docs: [], total: 0, recommendationFallback: true, reason: 'no_analyzed_resumes' };
 	}
 
-	const qHash = simpleQueryHash(mongoQuery);
-	const ck = cacheKey(name, qHash);
-	const cached = scoreCache.get(ck);
-	if (cached && cached.expiresAt > Date.now()) {
-		return paginateRecommendation(cached, skip, limit, scoreFilters);
-	}
-
-	const resumeVectors = await buildResumeVectorEntries(resumes, name);
+	const resumeVectors = await getCachedResumeVectors(name);
 	if (!resumeVectors.length) {
 		return { docs: [], total: 0, recommendationFallback: true, reason: 'embedding_failed' };
 	}
 
-	const candidateMap = await retrieveJobCandidates(resumeVectors);
-	if (!candidateMap.size) {
-		return { docs: [], total: 0, recommendationFallback: true, reason: 'no_candidates' };
+	const primary = pickPrimaryQueryVector(resumeVectors);
+	if (!primary?.vector?.length) {
+		return { docs: [], total: 0, recommendationFallback: true, reason: 'embedding_failed' };
 	}
 
-	const { scored: rankedRaw, poolIds } = await scoreCandidates(candidateMap, name);
+	const qdrantFilter = buildQdrantFilterFromBody(listBody || {});
 
-	let ranked = rankedRaw;
-	if (mongoQuery && jobsCollection) {
-		const matchingIds = new Set(
-			(await jobsCollection.find(mongoQuery, { projection: { _id: 1 } }).toArray())
-				.map((d) => String(d._id)),
-		);
-		ranked = ranked.filter((j) => matchingIds.has(String(j._id)));
-		// Drop pool ids that no longer match filters
-		for (const id of poolIds) {
-			if (!matchingIds.has(id)) poolIds.delete(id);
-		}
+	const pageRows = await fetchVectorRankedPage({
+		queryVector: primary.vector,
+		skip,
+		limit,
+		mongoQuery: mongoQuery || {},
+		qdrantFilter,
+	});
+
+	if (!pageRows.length) {
+		const catalogTotal = mongoQuery && jobsCollection
+			? await jobsCollection.countDocuments(mongoQuery)
+			: 0;
+		return {
+			docs: [],
+			total: catalogTotal,
+			catalogTotal,
+			recommendationFallback: false,
+		};
 	}
+
+	const merged = mergeMultiVectorScores(pageRows, resumeVectors);
+
+	let docs = await applyGraphBoostToPage(merged, name);
+	docs = applyScoreFilters(docs, scoreFilters);
 
 	const catalogTotal = mongoQuery && jobsCollection
 		? await jobsCollection.countDocuments(mongoQuery)
-		: ranked.length;
+		: docs.length;
 
-	const cacheEntry = {
-		ranked,
-		poolIds,
-		mongoQuery: mongoQuery || {},
+	return {
+		docs,
+		total: catalogTotal,
 		catalogTotal,
-		expiresAt: Date.now() + CACHE_TTL_MS,
+		recommendationFallback: false,
 	};
-	scoreCache.set(ck, cacheEntry);
-
-	return paginateRecommendation(cacheEntry, skip, limit, scoreFilters);
 }
 
 export function invalidateRecommendationCache(applierName) {
-	const prefix = `${String(applierName || '').trim()}::`;
-	for (const key of scoreCache.keys()) {
-		if (key.startsWith(prefix)) scoreCache.delete(key);
-	}
+	const key = vectorCacheKey(applierName);
+	vectorEntryCache.delete(key);
 }

@@ -63,7 +63,7 @@ export function scoreDerivationStages() {
 	return [
 		{
 			$addFields: {
-				scoreSkill: 45,
+				scoreSkill: { $ifNull: ['$scoreSkill', 45] },
 				scoreSalary: { $cond: [{ $isNumber: '$scoreSalary' }, '$scoreSalary', null] },
 				scoreApplicant: { $ifNull: ['$scoreApplicant', 50] },
 				scoreFreshness: {
@@ -176,6 +176,7 @@ export function buildScoreFilterStage(scoreFilters) {
 
 export function sortStageForApiSort(sort) {
 	if (sort === 'recommended') return { scoreOverall: -1, postedAt: -1, _id: -1 };
+	if (sort === 'scoreSkill_desc') return { scoreSkill: -1, postedAt: -1, _id: -1 };
 	if (sort === 'score_asc') return { scoreOverall: 1, postedAt: -1, _id: -1 };
 	if (sort === 'salary_desc') return { scoreSalary: -1, postedAt: -1, _id: -1 };
 	if (sort === 'salary_asc') return { scoreSalary: 1, postedAt: -1, _id: -1 };
@@ -184,7 +185,7 @@ export function sortStageForApiSort(sort) {
 }
 
 export function needsScorePipeline(sort, hasScoreFilters) {
-	return hasScoreFilters || ['recommended', 'score_asc', 'salary_desc', 'salary_asc'].includes(sort);
+	return hasScoreFilters || ['recommended', 'scoreSkill_desc', 'score_asc', 'salary_desc', 'salary_asc'].includes(sort);
 }
 
 export async function runJobListAggregation(jobsCollection, query, { sort, skip, limit, scoreFilters }) {

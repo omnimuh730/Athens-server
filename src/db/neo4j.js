@@ -11,14 +11,21 @@ export async function initNeo4j() {
 	const user = process.env.NEO4J_USER || 'neo4j';
 	const password = process.env.NEO4J_PASSWORD || 'skillgraph-dev';
 
-	driver = neo4j.driver(uri, neo4j.auth.basic(user, password), {
+	const candidate = neo4j.driver(uri, neo4j.auth.basic(user, password), {
 		maxConnectionPoolSize: 50,
 		connectionAcquisitionTimeout: 30_000,
 	});
 
-	await driver.verifyConnectivity();
-	console.log('Connected to Neo4j', uri);
-	await ensureGraphSchema();
+	try {
+		await candidate.verifyConnectivity();
+		driver = candidate;
+		console.log('Connected to Neo4j', uri);
+		await ensureGraphSchema();
+	} catch (err) {
+		await candidate.close().catch(() => {});
+		driver = null;
+		throw err;
+	}
 }
 
 export async function closeNeo4j() {

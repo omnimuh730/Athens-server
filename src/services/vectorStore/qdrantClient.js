@@ -68,6 +68,7 @@ export async function initQdrantCollections() {
 	try {
 		await ensureCollection(JOB_VECTORS_COLLECTION);
 		await ensureCollection(RESUME_VECTORS_COLLECTION);
+		await ensureJobPayloadIndexes();
 		collectionsReady = true;
 		console.log('[qdrant] collections ready');
 		return true;
@@ -78,6 +79,28 @@ export async function initQdrantCollections() {
 			+ `Is Qdrant running at ${url}? Try: cd Athens-server && npm run qdrant:start`,
 		);
 		return false;
+	}
+}
+
+/** Payload indexes for pre-filtering job vectors (source, postedAt). */
+async function ensureJobPayloadIndexes() {
+	if (!isQdrantConfigured()) return;
+	const indexes = [
+		{ field_name: 'source', field_schema: 'keyword' },
+		{ field_name: 'postedAt', field_schema: 'keyword' },
+	];
+	for (const index of indexes) {
+		try {
+			await qdrantFetch(
+				`/collections/${encodeURIComponent(JOB_VECTORS_COLLECTION)}/index`,
+				{ method: 'PUT', body: index },
+			);
+		} catch (err) {
+			const msg = String(err.message || err);
+			if (!msg.includes('already exists')) {
+				console.warn(`[qdrant] payload index ${index.field_name}:`, msg);
+			}
+		}
 	}
 }
 
@@ -143,16 +166,25 @@ export async function deleteJobVector(jobId) {
 	return true;
 }
 
-export async function searchJobVectors(queryVector, limit = 200) {
-	if (!isQdrantReady()) return [];
+export async function searchJobVectors(queryVector, options = {}) {
+	if (!isQdrantReady() || !queryVector?.length) return [];
+
+	const limit = Number(options.limit) || 200;
+	const offset = Math.max(0, Number(options.offset) || 0);
+	const body = {
+		vector: queryVector,
+		limit,
+		offset,
+		with_payload: true,
+	};
+	if (options.filter) body.filter = options.filter;
+	if (options.scoreThreshold !== undefined && options.scoreThreshold !== null) {
+		body.score_threshold = options.scoreThreshold;
+	}
 
 	const data = await qdrantFetch(`/collections/${encodeURIComponent(JOB_VECTORS_COLLECTION)}/points/search`, {
 		method: 'POST',
-		body: {
-			vector: queryVector,
-			limit,
-			with_payload: true,
-		},
+		body,
 	});
 
 	return (data?.result || []).map((hit) => ({
@@ -160,6 +192,17 @@ export async function searchJobVectors(queryVector, limit = 200) {
 		score: hit.score ?? 0,
 		payload: hit.payload || {},
 	}));
+}
+
+/** Count job vectors matching an optional Qdrant filter. */
+export async function countJobVectors(filter) {
+	if (!isQdrantReady()) return 0;
+	const body = filter ? { filter, exact: true } : { exact: true };
+	const data = await qdrantFetch(
+		`/collections/${encodeURIComponent(JOB_VECTORS_COLLECTION)}/points/count`,
+		{ method: 'POST', body },
+	);
+	return data?.result?.count ?? 0;
 }
 
 export async function getResumeVector(resumeId) {

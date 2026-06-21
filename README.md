@@ -27,10 +27,13 @@ Each applier can have **multiple analyzed resumes** (e.g. Frontend vs Backend). 
 
 When Job Search uses **Best match** (`sort=recommended`):
 
-1. Load all analyzed resume vectors for the applier
-2. Search job vectors in Qdrant (multi-vector **max** merge — identities are not averaged)
-3. Re-rank top candidates with Neo4j graph activation
-4. Return jobs with `matchScore`, `scoreSkill`, `bestResumeTechStack`, etc.
+1. Load analyzed resume + profile vectors for the applier (cached ~3 min)
+2. **Qdrant ring pagination** — fetch only the current page via vector similarity boundaries (`scoreAtRank`), not a full-catalog re-rank
+3. Apply Mongo filters on the page’s job IDs (status tab, title, company, etc.)
+4. Optional Neo4j graph boost on **the current page only** (~25 jobs), skipped when Neo4j is down
+5. Return jobs with `matchScore`, `scoreSkill`, `bestResumeTechStack`, etc.
+
+Job vectors store `source` and `postedAt` in Qdrant payload for pre-filtering. Status-tab filters use a small Mongo `$in` on hydrated page IDs.
 
 If Qdrant, Ollama, or analyzed resumes are missing, the API falls back to newest-first and sets `recommendationFallback: true`.
 

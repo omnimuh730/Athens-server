@@ -97,6 +97,21 @@ function finalizeQuery(query) {
 	return query;
 }
 
+const APPLIER_CACHE_TTL_MS = 5 * 60 * 1000;
+const applierIdCache = new Map();
+
+async function resolveApplierId(applierName) {
+	if (!applierName || !accountInfoCollection) return null;
+	const name = String(applierName).trim();
+	const cached = applierIdCache.get(name);
+	if (cached && cached.expiresAt > Date.now()) return cached.id;
+
+	const applierDoc = await accountInfoCollection.findOne({ name });
+	const id = applierDoc?._id || null;
+	applierIdCache.set(name, { id, expiresAt: Date.now() + APPLIER_CACHE_TTL_MS });
+	return id;
+}
+
 const SCORE_FILTER_KEYS = new Set([
 	'scoreOverallMin', 'scoreOverallMax',
 	'scoreSkillMin', 'scoreSkillMax',
@@ -129,11 +144,7 @@ export async function buildJobsListQuery(body, { statusTab } = {}) {
 	const scoreFilters = extractScoreFilters(body);
 	const hasScoreFilters = Object.keys(scoreFilters).length > 0;
 
-	let applierId = null;
-	if (applierName && accountInfoCollection) {
-		const applierDoc = await accountInfoCollection.findOne({ name: applierName });
-		applierId = applierDoc?._id || null;
-	}
+	const applierId = applierName ? await resolveApplierId(applierName) : null;
 
 	const query = { $and: [] };
 
@@ -224,3 +235,6 @@ export const STATUS_TABS = ['all', 'posted', 'applied', 'scheduled', 'declined']
 
 /** Fields omitted from list responses to reduce payload size. */
 export const JOB_LIST_PROJECTION = { description: 0, jobDescription: 0 };
+
+/** Full job detail — omit only heavy embedding vectors. */
+export const JOB_DETAIL_PROJECTION = { embedding: 0 };

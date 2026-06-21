@@ -124,6 +124,8 @@ async function scoreWithActivation(jobCanonicalIds, userCanonicalIds, userGraphS
  * @param {object[]} userGraphSkills — from user_knowledge_graphs.skills
  */
 export async function computeGraphBoost(jobSkills = [], userGraphSkills = []) {
+	if (!isNeo4jReady()) return 0;
+
 	const normalizedJobSkills = uniqueNormalizedSkills(jobSkills);
 	if (!normalizedJobSkills.length || !userGraphSkills.length) return 0;
 

@@ -12,6 +12,7 @@ import {
 	buildJobsListQuery,
 	STATUS_TABS,
 	JOB_LIST_PROJECTION,
+	JOB_DETAIL_PROJECTION,
 } from '../services/jobListQuery.js';
 import { queueJobAnalysis, getJobAnalysisStatus } from '../services/jobAnalysis/index.js';
 import { enqueueSkills } from '../services/skillEnrichment/queue.js';
@@ -217,24 +218,28 @@ export async function removeJobsForRule(req, res) {
 	}
 }
 
-/** Cheap count-only path — skips recommendation and aggregation. */
+/** Cheap count-only path — single aggregation with $facet per status tab. */
 export async function getJobStatusCounts(req, res) {
 	try {
 		if (!jobsCollection) {
 			return res.status(503).json({ success: false, error: 'Database not ready' });
 		}
 
-		const entries = await Promise.all(
-			STATUS_TABS.map(async (tab) => {
-				const { query } = await buildJobsListQuery(req.body, { statusTab: tab });
-				const total = await jobsCollection.countDocuments(query);
-				return [tab, total];
-			}),
-		);
+		const facet = {};
+		for (const tab of STATUS_TABS) {
+			const { query } = await buildJobsListQuery(req.body, { statusTab: tab });
+			facet[tab] = [{ $match: query }, { $count: 'count' }];
+		}
+
+		const [result] = await jobsCollection.aggregate([{ $facet: facet }]).toArray();
+		const counts = {};
+		for (const tab of STATUS_TABS) {
+			counts[tab] = result?.[tab]?.[0]?.count ?? 0;
+		}
 
 		return res.json({
 			success: true,
-			counts: Object.fromEntries(entries),
+			counts,
 		});
 	} catch (err) {
 		console.error('POST /api/jobs/list/counts error', err);
@@ -293,6 +298,7 @@ export async function getJobs(req, res) {
 				applierName,
 				mongoQuery: query,
 				scoreFilters,
+				listBody: req.body,
 				skip,
 				limit: limitNum,
 			});
@@ -540,6 +546,26 @@ export async function analyzeJob(req, res) {
 		const status = err.message === 'Job not found' ? 404 : err.message === 'Invalid job id' ? 400 : 500;
 		console.error('POST /api/jobs/:id/analyze error', err);
 		return res.status(status).json({ success: false, error: err.message });
+	}
+}
+
+/** Full job document for View JD (description, skills, etc.). */
+export async function getJobById(req, res) {
+	try {
+		if (!jobsCollection) return res.status(503).json({ success: false, error: 'Database not ready' });
+		const { id } = req.params;
+		if (!id || !ObjectId.isValid(id)) {
+			return res.status(400).json({ success: false, error: 'Invalid job id' });
+		}
+		const doc = await jobsCollection.findOne(
+			{ _id: new ObjectId(id) },
+			{ projection: JOB_DETAIL_PROJECTION },
+		);
+		if (!doc) return res.status(404).json({ success: false, error: 'Job not found' });
+		return res.json({ success: true, data: doc });
+	} catch (err) {
+		console.error(`GET /api/jobs/${req.params.id} error`, err);
+		return res.status(500).json({ success: false, error: 'Failed to fetch job' });
 	}
 }
 

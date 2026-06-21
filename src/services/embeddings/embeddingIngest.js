@@ -67,6 +67,8 @@ export async function upsertJobEmbedding(jobId, { applierName } = {}) {
 		await upsertJobVector(String(job._id), vector, {
 			title: job.title || '',
 			skills: (job.skills || []).slice(0, 50),
+			source: job.source || 'Other',
+			postedAt: job.postedAt ? String(job.postedAt).slice(0, 10) : '',
 		});
 
 		await jobsCollection.updateOne(
