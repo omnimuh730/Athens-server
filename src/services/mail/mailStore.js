@@ -1,0 +1,231 @@
+import {
+	mailMessagesCollection,
+	mailSyncStateCollection,
+} from '../../db/mongo.js';
+import { extractCustomLabels } from './folderMapper.js';
+
+function getInitialSyncSize() {
+	return Number.parseInt(process.env.MAIL_INITIAL_SYNC_SIZE || '250', 10) || 250;
+}
+
+function getOlderBatchSize() {
+	return Number.parseInt(process.env.MAIL_OLDER_BATCH_SIZE || '50', 10) || 50;
+}
+
+function getSyncMinIntervalMs() {
+	return Number.parseInt(process.env.MAIL_SYNC_MIN_INTERVAL_MS || '45000', 10) || 45000;
+}
+
+export { getInitialSyncSize, getOlderBatchSize, getSyncMinIntervalMs };
+
+export async function getSyncState(applierName) {
+	if (!mailSyncStateCollection) return null;
+	const doc = await mailSyncStateCollection.findOne({ applierName });
+	return (
+		doc || {
+			applierName,
+			highestUid: 0,
+			oldestCachedUid: 0,
+			initialSyncComplete: false,
+			lastImapSyncAt: null,
+			syncInProgress: false,
+			lastError: null,
+		}
+	);
+}
+
+export async function upsertSyncState(applierName, patch) {
+	if (!mailSyncStateCollection) return;
+	await mailSyncStateCollection.updateOne(
+		{ applierName },
+		{
+			$set: { ...patch, updatedAt: new Date() },
+			$setOnInsert: { applierName },
+		},
+		{ upsert: true },
+	);
+}
+
+export async function acquireSyncLock(applierName) {
+	if (!mailSyncStateCollection) return false;
+	const result = await mailSyncStateCollection.findOneAndUpdate(
+		{
+			applierName,
+			$or: [{ syncInProgress: { $exists: false } }, { syncInProgress: { $ne: true } }],
+		},
+		{
+			$set: { syncInProgress: true, updatedAt: new Date() },
+			$setOnInsert: {
+				applierName,
+				highestUid: 0,
+				oldestCachedUid: 0,
+				initialSyncComplete: false,
+			},
+		},
+		{ returnDocument: 'after', upsert: true },
+	);
+	return Boolean(result && result.syncInProgress);
+}
+
+export async function releaseSyncLock(applierName, patch = {}) {
+	await upsertSyncState(applierName, { syncInProgress: false, ...patch });
+}
+
+export async function canSync(applierName, force = false) {
+	if (force) return true;
+	const state = await getSyncState(applierName);
+	if (state.syncInProgress) return false;
+	if (!state.lastImapSyncAt) return true;
+	const elapsed = Date.now() - new Date(state.lastImapSyncAt).getTime();
+	return elapsed >= getSyncMinIntervalMs();
+}
+
+export async function upsertMessages(messages) {
+	if (!mailMessagesCollection || !messages.length) return { upserted: 0 };
+	const ops = messages.map((msg) => {
+		const setFields = { ...msg, syncedAt: new Date() };
+		// Preserve cached bodies when refreshing envelopes/flags only
+		if (!msg.hasBody) {
+			delete setFields.hasBody;
+			delete setFields.bodyText;
+			delete setFields.bodyHtml;
+		}
+		return {
+			updateOne: {
+				filter: { applierName: msg.applierName, uid: msg.uid },
+				update: {
+					$set: setFields,
+					$setOnInsert: { hasBody: false, bodyText: '', bodyHtml: null },
+				},
+				upsert: true,
+			},
+		};
+	});
+	const result = await mailMessagesCollection.bulkWrite(ops, { ordered: false });
+	return { upserted: result.upsertedCount + result.modifiedCount };
+}
+
+export async function updateMessageFlags(applierName, uid, patch) {
+	if (!mailMessagesCollection) return null;
+	const result = await mailMessagesCollection.findOneAndUpdate(
+		{ applierName, uid: Number(uid) },
+		{ $set: { ...patch, syncedAt: new Date() } },
+		{ returnDocument: 'after' },
+	);
+	return result;
+}
+
+export async function updateMessageBody(applierName, uid, bodyPatch) {
+	if (!mailMessagesCollection) return null;
+	return mailMessagesCollection.findOneAndUpdate(
+		{ applierName, uid: Number(uid) },
+		{
+			$set: {
+				...bodyPatch,
+				hasBody: true,
+				syncedAt: new Date(),
+			},
+		},
+		{ returnDocument: 'after' },
+	);
+}
+
+export async function getMessage(applierName, uid) {
+	if (!mailMessagesCollection) return null;
+	return mailMessagesCollection.findOne({ applierName, uid: Number(uid) });
+}
+
+export async function listMessages(applierName, { folder, label, search, limit = 100, beforeDate } = {}) {
+	if (!mailMessagesCollection) return [];
+
+	const filter = { applierName };
+	if (folder) filter.folder = folder;
+	if (label) {
+		const escaped = String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		filter.gmailLabels = { $regex: escaped, $options: 'i' };
+	}
+	if (beforeDate) filter.date = { $lt: new Date(beforeDate) };
+	if (search?.trim()) {
+		const q = search.trim();
+		filter.$or = [
+			{ subject: { $regex: q, $options: 'i' } },
+			{ 'from.name': { $regex: q, $options: 'i' } },
+			{ 'from.email': { $regex: q, $options: 'i' } },
+			{ preview: { $regex: q, $options: 'i' } },
+		];
+	}
+
+	return mailMessagesCollection
+		.find(filter)
+		.sort({ date: -1 })
+		.limit(Math.min(Math.max(limit, 1), 500))
+		.toArray();
+}
+
+export async function getRecentUidsForFlagRefresh(applierName, days = 7) {
+	if (!mailMessagesCollection) return [];
+	const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+	const docs = await mailMessagesCollection
+		.find({ applierName, date: { $gte: since } })
+		.project({ uid: 1 })
+		.toArray();
+	return docs.map((d) => d.uid);
+}
+
+export async function getUserLabels(_applierName) {
+	// Deprecated — labels come from Gmail via IMAP in mailController
+	return [];
+}
+
+export async function saveUserLabels(_applierName, labels) {
+	return labels;
+}
+
+export function messageToThread(doc) {
+	const date = doc.date instanceof Date ? doc.date : new Date(doc.date);
+	const customLabels = doc.gmailLabels?.length
+		? extractCustomLabels(doc.gmailLabels)
+		: (doc.labels || []).filter((l) => l !== 'starred' && l !== 'Starred');
+
+	return {
+		id: String(doc.uid),
+		uid: doc.uid,
+		from: doc.from?.name
+			? doc.from.email
+				? doc.from.name
+				: doc.from.name
+			: doc.from?.email || 'Unknown',
+		fromEmail: doc.from?.email || '',
+		subj: doc.subject || '(No subject)',
+		prev: doc.preview || '',
+		body: doc.bodyText || doc.preview || '',
+		bodyHtml: doc.bodyHtml || null,
+		time: formatMailTime(date),
+		date: date.toISOString(),
+		unread: !doc.flags?.seen,
+		starred: Boolean(doc.flags?.flagged),
+		tag: customLabels[0] || '',
+		folder: doc.folder || 'inbox',
+		labels: customLabels,
+		gmailLabels: doc.gmailLabels || [],
+		hasBody: Boolean(doc.hasBody),
+	};
+}
+
+/** Today → "3:17 PM"; previous days → "Jun 19" */
+function formatMailTime(date) {
+	const now = new Date();
+	const isToday =
+		date.getFullYear() === now.getFullYear() &&
+		date.getMonth() === now.getMonth() &&
+		date.getDate() === now.getDate();
+
+	if (isToday) {
+		return date.toLocaleTimeString(undefined, {
+			hour: 'numeric',
+			minute: '2-digit',
+			hour12: true,
+		});
+	}
+	return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}

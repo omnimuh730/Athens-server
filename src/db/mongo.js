@@ -22,6 +22,23 @@ let skillCooccurrenceCollection;
 // Always local (AIMS_local) — this is the user's working data.
 let resumeGeneratorConfigCollection;
 let resumeGenerationsCollection;
+let mailMessagesCollection;
+let mailSyncStateCollection;
+let mailUserLabelsCollection;
+
+async function ensureMailCollectionsIndexes() {
+	if (mailMessagesCollection) {
+		await mailMessagesCollection.createIndex({ applierName: 1, uid: 1 }, { unique: true });
+		await mailMessagesCollection.createIndex({ applierName: 1, date: -1 });
+		await mailMessagesCollection.createIndex({ applierName: 1, folder: 1, date: -1 });
+	}
+	if (mailSyncStateCollection) {
+		await mailSyncStateCollection.createIndex({ applierName: 1 }, { unique: true });
+	}
+	if (mailUserLabelsCollection) {
+		await mailUserLabelsCollection.createIndex({ applierName: 1 }, { unique: true });
+	}
+}
 
 async function ensureSkillCollectionsIndexes() {
 	if (skillEnrichmentQueueCollection) {
@@ -61,8 +78,12 @@ async function initMongo() {
 	rulesCollection = db.collection('rules');
 	resumeGeneratorConfigCollection = db.collection('resume_generator_config');
 	resumeGenerationsCollection = db.collection('resume_generations');
+	mailMessagesCollection = db.collection('mail_messages');
+	mailSyncStateCollection = db.collection('mail_sync_state');
+	mailUserLabelsCollection = db.collection('mail_user_labels');
 	await ensureJobMarketIndexes(jobsCollection);
 	await ensureSkillCollectionsIndexes();
+	await ensureMailCollectionsIndexes();
 	void backfillMissingJobSourceFields(jobsCollection).catch((err) => {
 		console.warn('[job_market] source field backfill failed', err.message);
 	});
@@ -170,5 +191,8 @@ export {
 	bidRecordsCloudCollection,
 	resumeGeneratorConfigCollection,
 	resumeGenerationsCollection,
+	mailMessagesCollection,
+	mailSyncStateCollection,
+	mailUserLabelsCollection,
 	closeMongo
 };

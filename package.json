@@ -22,8 +22,11 @@
 		"express": "^5.1.0",
 		"googleapis": "^155.0.0",
 		"html-to-docx": "^1.8.0",
+		"imapflow": "^1.4.2",
+		"mailparser": "^3.9.11",
 		"mongodb": "^6.19.0",
 		"neo4j-driver": "^6.1.0",
+		"nodemailer": "^9.0.1",
 		"puppeteer": "^25.1.0",
 		"socket.io": "^4.8.1"
 	},

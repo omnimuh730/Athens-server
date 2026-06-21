@@ -21,6 +21,7 @@ import foxRoutes from "./src/routes/foxRoutes.js";
 import ruleRoutes from "./src/routes/ruleRoutes.js";
 import skillScoreRoutes from "./src/routes/skillScoreRoutes.js";
 import vendorMonitorRoutes from "./src/routes/vendorMonitorRoutes.js";
+import mailRoutes from "./src/routes/mailRoutes.js";
 import {
 	getAutoBidProfile,
 	upsertAutoBidProfile,
@@ -66,6 +67,7 @@ app.use('/api', foxRoutes);
 app.use('/api', ruleRoutes);
 app.use('/api', skillScoreRoutes);
 app.use('/api', vendorMonitorRoutes);
+app.use('/api', mailRoutes);
 
 // Aliases without `/api` (reverse proxies that strip `/api` before forwarding to Node).
 app.get("/personal/auto-bid-profile", getAutoBidProfile);
