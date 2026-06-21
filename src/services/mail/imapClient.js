@@ -2,9 +2,11 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import {
 	ALL_MAIL_PATH,
+	FOLDER_MAILBOX,
 	envelopeFrom,
 	envelopeToArray,
 	extractCustomLabels,
+	folderToMailbox,
 	gmailLabelsToArray,
 	mapGmailLabelsToFolder,
 	messageToDoc,
@@ -68,15 +70,35 @@ export async function verifyImapCredentials(email, password) {
 	}
 }
 
-async function withMailbox(email, password, fn) {
+function inlineCidImages(html, attachments) {
+	if (!html || !attachments?.length) return html;
+	let result = html;
+	for (const att of attachments) {
+		const cid = att.cid || att.contentId;
+		if (!cid || !att.content) continue;
+		const cleanCid = String(cid).replace(/^<|>$/g, '');
+		const mime = att.contentType || 'image/png';
+		const content = Buffer.isBuffer(att.content) ? att.content : Buffer.from(att.content);
+		const dataUri = `data:${mime};base64,${content.toString('base64')}`;
+		const escaped = cleanCid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		result = result.replace(new RegExp(`cid:${escaped}`, 'gi'), dataUri);
+	}
+	return result;
+}
+
+async function withMailboxPath(email, password, mailboxPath, fn) {
 	const client = await createClient(email, password);
-	const lock = await client.getMailboxLock(ALL_MAIL_PATH);
+	const lock = await client.getMailboxLock(mailboxPath);
 	try {
 		return await fn(client);
 	} finally {
 		lock.release();
 		await client.logout();
 	}
+}
+
+async function withMailbox(email, password, fn) {
+	return withMailboxPath(email, password, ALL_MAIL_PATH, fn);
 }
 
 /**
@@ -209,7 +231,10 @@ export async function fetchMessageBody(email, password, uid) {
 
 		const parsed = await simpleParser(message.source);
 		const from = parsed.from?.value?.[0];
-		const htmlBody = extractHtmlBody(parsed);
+		let htmlBody = extractHtmlBody(parsed);
+		if (htmlBody && parsed.attachments?.length) {
+			htmlBody = inlineCidImages(htmlBody, parsed.attachments);
+		}
 		const textBody = parsed.text?.trim() || stripHtml(parsed.html ?? '');
 		const previewSource = textBody || stripHtml(parsed.html ?? '') || parsed.subject || '';
 
@@ -353,4 +378,65 @@ export async function removeLabelsFromMessage(email, password, uid, labelNames) 
 	return withMailbox(email, password, async (client) => {
 		await client.messageLabelsRemove(String(uid), tokens, { uid: true });
 	});
+}
+
+/**
+ * Fetch one page of messages from a folder-specific Gmail mailbox.
+ */
+export async function fetchMailboxPage(email, password, folder, page, pageSize, applierName) {
+	const mailboxPath = folderToMailbox(folder);
+	return withMailboxPath(email, password, mailboxPath, async (client) => {
+		const total = client.mailbox.exists ?? 0;
+		if (total === 0) return { messages: [], total: 0 };
+
+		const size = Math.min(Math.max(pageSize, 1), 100);
+		const end = total - (page - 1) * size;
+		const start = Math.max(1, end - size + 1);
+		if (end < 1) return { messages: [], total };
+
+		const messages = [];
+		for await (const message of client.fetch(`${start}:${end}`, {
+			envelope: true,
+			flags: true,
+			uid: true,
+			labels: true,
+		})) {
+			const doc = messageToDoc(message, applierName);
+			doc.folder = folder;
+			messages.push(doc);
+		}
+		messages.reverse();
+		return { messages, total };
+	});
+}
+
+/**
+ * Live folder totals from Gmail (total + unread for inbox).
+ */
+export async function fetchFolderCounts(email, password) {
+	const client = await createClient(email, password);
+	const counts = {};
+	try {
+		for (const [folder, path] of Object.entries(FOLDER_MAILBOX)) {
+			const lock = await client.getMailboxLock(path);
+			try {
+				const total = client.mailbox.exists ?? 0;
+				let unread = 0;
+				if (folder === 'inbox') {
+					const unseen = await client.search({ unseen: true });
+					unread = Array.isArray(unseen) ? unseen.length : 0;
+				}
+				counts[folder] = {
+					total,
+					unread,
+					badge: folder === 'inbox' ? unread : total,
+				};
+			} finally {
+				lock.release();
+			}
+		}
+	} finally {
+		await client.logout();
+	}
+	return counts;
 }

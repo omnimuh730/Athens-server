@@ -135,9 +135,26 @@ export async function getMessage(applierName, uid) {
 	return mailMessagesCollection.findOne({ applierName, uid: Number(uid) });
 }
 
-export async function listMessages(applierName, { folder, label, search, limit = 100, beforeDate } = {}) {
+export async function listMessages(
+	applierName,
+	{ folder, label, search, page = 1, pageSize = 25, limit, beforeDate } = {},
+) {
 	if (!mailMessagesCollection) return [];
 
+	const filter = buildMessageFilter(applierName, { folder, label, search, beforeDate });
+	const size = Math.min(Math.max(limit ?? pageSize, 1), 100);
+	const skip = limit ? 0 : (Math.max(page, 1) - 1) * size;
+
+	return mailMessagesCollection.find(filter).sort({ date: -1 }).skip(skip).limit(size).toArray();
+}
+
+export async function countMessages(applierName, { folder, label, search, beforeDate } = {}) {
+	if (!mailMessagesCollection) return 0;
+	const filter = buildMessageFilter(applierName, { folder, label, search, beforeDate });
+	return mailMessagesCollection.countDocuments(filter);
+}
+
+function buildMessageFilter(applierName, { folder, label, search, beforeDate } = {}) {
 	const filter = { applierName };
 	if (folder) filter.folder = folder;
 	if (label) {
@@ -152,14 +169,15 @@ export async function listMessages(applierName, { folder, label, search, limit =
 			{ 'from.name': { $regex: q, $options: 'i' } },
 			{ 'from.email': { $regex: q, $options: 'i' } },
 			{ preview: { $regex: q, $options: 'i' } },
+			{ bodyText: { $regex: q, $options: 'i' } },
 		];
 	}
+	return filter;
+}
 
-	return mailMessagesCollection
-		.find(filter)
-		.sort({ date: -1 })
-		.limit(Math.min(Math.max(limit, 1), 500))
-		.toArray();
+export async function getCachedMessageCount(applierName, uids) {
+	if (!mailMessagesCollection || !uids.length) return 0;
+	return mailMessagesCollection.countDocuments({ applierName, uid: { $in: uids } });
 }
 
 export async function getRecentUidsForFlagRefresh(applierName, days = 7) {
@@ -212,7 +230,7 @@ export function messageToThread(doc) {
 	};
 }
 
-/** Today → "3:17 PM"; previous days → "Jun 19" */
+/** Today → "3:17 PM"; previous days → "Jun 19" (single line) */
 function formatMailTime(date) {
 	const now = new Date();
 	const isToday =
@@ -227,5 +245,6 @@ function formatMailTime(date) {
 			hour12: true,
 		});
 	}
-	return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+	const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+	return `${months[date.getMonth()]} ${date.getDate()}`;
 }

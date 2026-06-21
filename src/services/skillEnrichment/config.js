@@ -57,3 +57,27 @@ export function getWorkerIntervalMs() {
 export function getJobAnalysisBatchSize() {
 	return Number(process.env.SKILL_GRAPH_JOB_ANALYSIS_BATCH_SIZE) || 2;
 }
+
+/** `fast` = heuristic only ($0); `smart` = LLM for ambiguous skills only. */
+export function getEnrichmentMode() {
+	const mode = String(process.env.SKILL_GRAPH_ENRICHMENT_MODE || 'fast').toLowerCase();
+	return mode === 'smart' ? 'smart' : 'fast';
+}
+
+export function isSmartEnrichmentMode() {
+	return getEnrichmentMode() === 'smart';
+}
+
+export function getEnrichmentConcurrency() {
+	return Math.max(1, Math.min(20, Number(process.env.SKILL_GRAPH_ENRICH_CONCURRENCY) || 10));
+}
+
+export function getFuzzyAliasThreshold() {
+	const v = Number(process.env.SKILL_GRAPH_FUZZY_ALIAS_THRESHOLD);
+	return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.85;
+}
+
+/** Fuzzy scores in [min, max) with competing candidates → LLM in smart mode. */
+export function getAmbiguousScoreRange() {
+	return { min: 0.5, max: getFuzzyAliasThreshold() };
+}

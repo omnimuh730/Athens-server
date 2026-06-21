@@ -1,5 +1,18 @@
 const ALL_MAIL_PATH = '[Gmail]/All Mail';
 
+/** Gmail IMAP mailbox paths per Athens folder. */
+export const FOLDER_MAILBOX = {
+	inbox: 'INBOX',
+	sent: '[Gmail]/Sent Mail',
+	drafts: '[Gmail]/Drafts',
+	trash: '[Gmail]/Trash',
+	spam: '[Gmail]/Spam',
+};
+
+export function folderToMailbox(folder) {
+	return FOLDER_MAILBOX[folder] || ALL_MAIL_PATH;
+}
+
 /** Gmail system labels — excluded from custom label display/filter. */
 const SYSTEM_LABELS = new Set([
 	'inbox',

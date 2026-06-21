@@ -90,13 +90,14 @@ export async function enrichAgainstCandidates({
 	return { result: parsed, usage };
 }
 
-function buildHeuristicResult(rawSkill, normalizedKey, candidates) {
-	if (candidates.length === 1 && candidates[0].score >= 0.95) {
+export function buildHeuristicResult(rawSkill, normalizedKey, candidates, fuzzyThreshold = 0.85) {
+	const top = candidates[0];
+	if (candidates.length === 1 && top && top.score >= fuzzyThreshold) {
 		return {
 			result: {
 				action: 'alias',
-				targetId: candidates[0].id,
-				confidence: candidates[0].score,
+				targetId: top.id,
+				confidence: top.score,
 				relationships: [],
 			},
 			usage: null,

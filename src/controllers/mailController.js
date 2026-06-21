@@ -13,7 +13,6 @@ import {
 import { sendMail } from '../services/mail/smtpClient.js';
 import {
 	getMessage,
-	listMessages,
 	messageToThread,
 	updateMessageFlags,
 } from '../services/mail/mailStore.js';
@@ -21,12 +20,65 @@ import { mailMessagesCollection } from '../db/mongo.js';
 import {
 	ensureMessageBody,
 	runIncrementalSync,
-	runInitialSync,
-	runOlderSync,
+	loadFolderPage,
+	loadLabelOrSearchPage,
+	getFolderCounts,
+	prefetchMessageBodies,
 } from '../services/mail/mailSyncService.js';
 
-function getPageLoadLimit() {
-	return Number.parseInt(process.env.MAIL_PAGE_LOAD_LIMIT || '100', 10) || 100;
+function parsePageQuery(req) {
+	const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+	const pageSize = Math.min(
+		100,
+		Math.max(1, Number.parseInt(String(req.query.pageSize || '25'), 10) || 25),
+	);
+	return { page, pageSize };
+}
+
+export async function getMailThreads(req, res) {
+	try {
+		if (!mailMessagesCollection) {
+			return res.status(503).json({ success: false, error: 'Database not ready' });
+		}
+		const applierName = await requireApplier(req, res);
+		if (!applierName) return;
+
+		const folder = req.query.folder ? String(req.query.folder) : 'inbox';
+		const label = req.query.label ? String(req.query.label) : undefined;
+		const search = req.query.search ? String(req.query.search) : undefined;
+		const { page, pageSize } = parsePageQuery(req);
+
+		const creds = await resolveMailCredentials(applierName);
+		if (!creds.ok) {
+			return res.status(400).json({ success: false, error: creds.error, credentialsMissing: true });
+		}
+
+		let result;
+		if (label || search) {
+			result = await loadLabelOrSearchPage(applierName, { folder, label, search, page, pageSize });
+		} else {
+			result = await loadFolderPage(applierName, folder, page, pageSize);
+		}
+
+		if (!result.ok) {
+			return res.status(500).json({ success: false, error: result.error });
+		}
+
+		// Background prefetch bodies for list previews
+		const uids = result.threads.map((t) => Number(t.uid)).filter(Boolean);
+		void prefetchMessageBodies(applierName, uids);
+
+		return res.json({
+			success: true,
+			threads: result.threads,
+			total: result.total,
+			page: result.page,
+			pageSize: result.pageSize,
+		});
+	} catch (err) {
+		console.error('GET /api/mail/threads error', err);
+		return res.status(500).json({ success: false, error: err.message });
+	}
 }
 
 async function requireApplier(req, res) {
@@ -41,30 +93,6 @@ async function requireApplier(req, res) {
 		return null;
 	}
 	return applierName;
-}
-
-export async function getMailThreads(req, res) {
-	try {
-		if (!mailMessagesCollection) {
-			return res.status(503).json({ success: false, error: 'Database not ready' });
-		}
-		const applierName = await requireApplier(req, res);
-		if (!applierName) return;
-
-		const folder = req.query.folder ? String(req.query.folder) : undefined;
-		const label = req.query.label ? String(req.query.label) : undefined;
-		const search = req.query.search ? String(req.query.search) : undefined;
-		const beforeDate = req.query.beforeDate ? String(req.query.beforeDate) : undefined;
-		const limit = req.query.limit ? Number(req.query.limit) : getPageLoadLimit();
-
-		const docs = await listMessages(applierName, { folder, label, search, limit, beforeDate });
-		const threads = docs.map(messageToThread);
-
-		return res.json({ success: true, threads, count: threads.length });
-	} catch (err) {
-		console.error('GET /api/mail/threads error', err);
-		return res.status(500).json({ success: false, error: err.message });
-	}
 }
 
 export async function getMailMessage(req, res) {
@@ -130,20 +158,20 @@ export async function syncMailInitial(req, res) {
 		const applierName = await requireApplier(req, res);
 		if (!applierName) return;
 
-		const creds = await resolveMailCredentials(applierName);
-		if (!creds.ok) {
-			return res.status(400).json({ success: false, error: creds.error, credentialsMissing: true });
-		}
+		const folder = req.body?.folder ? String(req.body.folder) : 'inbox';
+		const page = Math.max(1, Number(req.body?.page) || 1);
+		const pageSize = Math.min(100, Math.max(1, Number(req.body?.pageSize) || 25));
 
-		const force = req.body?.force === true;
-		const result = await runInitialSync(applierName, { force });
+		const result = await loadFolderPage(applierName, folder, page, pageSize);
 		if (!result.ok) {
 			return res.status(500).json({ success: false, error: result.error });
 		}
 		return res.json({
 			success: true,
-			skipped: result.skipped ?? false,
-			newCount: result.newCount ?? 0,
+			threads: result.threads,
+			total: result.total,
+			page: result.page,
+			pageSize: result.pageSize,
 		});
 	} catch (err) {
 		console.error('POST /api/mail/sync/initial error', err);
@@ -152,28 +180,21 @@ export async function syncMailInitial(req, res) {
 }
 
 export async function syncMailOlder(req, res) {
+	return res.json({ success: true, newCount: 0, hasMore: false, message: 'Use page navigation instead' });
+}
+
+export async function getMailFolderCounts(req, res) {
 	try {
 		const applierName = await requireApplier(req, res);
 		if (!applierName) return;
 
-		const creds = await resolveMailCredentials(applierName);
-		if (!creds.ok) {
-			return res.status(400).json({ success: false, error: creds.error, credentialsMissing: true });
-		}
-
-		const batchSize = req.body?.batchSize ? Number(req.body.batchSize) : undefined;
-		const result = await runOlderSync(applierName, batchSize);
+		const result = await getFolderCounts(applierName);
 		if (!result.ok) {
 			return res.status(500).json({ success: false, error: result.error });
 		}
-		return res.json({
-			success: true,
-			skipped: result.skipped ?? false,
-			newCount: result.newCount ?? 0,
-			hasMore: result.hasMore ?? false,
-		});
+		return res.json({ success: true, counts: result.counts, cached: result.cached ?? false });
 	} catch (err) {
-		console.error('POST /api/mail/sync/older error', err);
+		console.error('GET /api/mail/folder-counts error', err);
 		return res.status(500).json({ success: false, error: err.message });
 	}
 }

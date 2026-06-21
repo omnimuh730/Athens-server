@@ -31,12 +31,12 @@ export async function enqueueSkills(rawSkills = [], cooccurringSkills = []) {
 					attempts: 0,
 					createdAt: now,
 				},
-				$set: { updatedAt: now },
+				$set: { updatedAt: now, surfaceForm },
 			},
 			{ upsert: true },
 		);
 
-		if (result.upsertedCount > 0) {
+		if (result.upsertedCount > 0 || result.modifiedCount > 0) {
 			enqueued.push({ normalizedKey, surfaceForm });
 		}
 	}
@@ -49,7 +49,7 @@ export async function claimNextBatch(limit = 5) {
 
 	const now = new Date().toISOString();
 	const pending = await skillEnrichmentQueueCollection
-		.find({ status: 'pending' })
+		.find({ status: { $in: ['pending', 'failed'] } })
 		.sort({ createdAt: 1 })
 		.limit(limit)
 		.toArray();
@@ -57,7 +57,7 @@ export async function claimNextBatch(limit = 5) {
 	const claimed = [];
 	for (const doc of pending) {
 		const r = await skillEnrichmentQueueCollection.findOneAndUpdate(
-			{ _id: doc._id, status: 'pending' },
+			{ _id: doc._id, status: { $in: ['pending', 'failed'] } },
 			{ $set: { status: 'processing', updatedAt: now }, $inc: { attempts: 1 } },
 			{ returnDocument: 'after' },
 		);
@@ -66,12 +66,29 @@ export async function claimNextBatch(limit = 5) {
 	return claimed;
 }
 
-export async function markDone(normalizedKey) {
+export async function markDoneWithMeta(normalizedKey, meta = {}) {
 	if (!skillEnrichmentQueueCollection) return;
+	const now = new Date().toISOString();
 	await skillEnrichmentQueueCollection.updateOne(
 		{ normalizedKey },
-		{ $set: { status: 'done', updatedAt: new Date().toISOString(), error: null } },
+		{
+			$set: {
+				status: 'done',
+				updatedAt: now,
+				analyzedAt: now,
+				error: null,
+				enrichmentPath: meta.enrichmentPath ?? meta.path ?? null,
+				skillId: meta.skillId ?? null,
+				action: meta.action ?? null,
+				relationshipCount: meta.relationshipCount ?? 0,
+				usage: meta.usage ?? null,
+			},
+		},
 	);
+}
+
+export async function markDone(normalizedKey) {
+	return markDoneWithMeta(normalizedKey, {});
 }
 
 export async function markFailed(normalizedKey, error) {
@@ -88,10 +105,57 @@ export async function markFailed(normalizedKey, error) {
 	);
 }
 
+export async function markCancelled(normalizedKey) {
+	if (!skillEnrichmentQueueCollection) return;
+	await skillEnrichmentQueueCollection.updateOne(
+		{ normalizedKey, status: 'processing' },
+		{ $set: { status: 'pending', updatedAt: new Date().toISOString() } },
+	);
+}
+
 export async function requeueFailed(maxAttempts = 3) {
 	if (!skillEnrichmentQueueCollection) return 0;
 	const r = await skillEnrichmentQueueCollection.updateMany(
 		{ status: 'failed', attempts: { $lt: maxAttempts } },
+		{ $set: { status: 'pending', updatedAt: new Date().toISOString() } },
+	);
+	return r.modifiedCount;
+}
+
+export async function listPendingSkills({ limit = 200, statuses = ['pending', 'failed'] } = {}) {
+	if (!skillEnrichmentQueueCollection) return [];
+	return skillEnrichmentQueueCollection
+		.find({ status: { $in: statuses } })
+		.sort({ createdAt: 1 })
+		.limit(limit)
+		.project({
+			normalizedKey: 1,
+			surfaceForm: 1,
+			status: 1,
+			createdAt: 1,
+			attempts: 1,
+			error: 1,
+		})
+		.toArray();
+}
+
+export async function countQueueStats() {
+	if (!skillEnrichmentQueueCollection) {
+		return { pending: 0, processing: 0, done: 0, failed: 0, total: 0 };
+	}
+	const [pending, processing, done, failed] = await Promise.all([
+		skillEnrichmentQueueCollection.countDocuments({ status: { $in: ['pending', 'failed'] } }),
+		skillEnrichmentQueueCollection.countDocuments({ status: 'processing' }),
+		skillEnrichmentQueueCollection.countDocuments({ status: 'done' }),
+		skillEnrichmentQueueCollection.countDocuments({ status: 'failed' }),
+	]);
+	return { pending, processing, done, failed, total: pending + processing + done };
+}
+
+export async function resetProcessingToPending() {
+	if (!skillEnrichmentQueueCollection) return 0;
+	const r = await skillEnrichmentQueueCollection.updateMany(
+		{ status: 'processing' },
 		{ $set: { status: 'pending', updatedAt: new Date().toISOString() } },
 	);
 	return r.modifiedCount;

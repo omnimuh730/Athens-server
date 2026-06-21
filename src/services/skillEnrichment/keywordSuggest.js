@@ -5,10 +5,15 @@ const SYSTEM = `You suggest search keywords to find an existing software skill i
 Return JSON only: { "searchKeywords": string[] }
 Provide 3-5 short keywords (lowercase, no sentences). Include canonical tech names and parent technologies.`;
 
+/** Free tokenization — no LLM. Used in fast mode and as first pass in smart mode. */
+export function heuristicSearchKeywords(rawSkill) {
+	const parts = String(rawSkill).toLowerCase().split(/[^a-z0-9+#.]+/).filter(p => p.length > 1);
+	return [...new Set(parts)].slice(0, 5);
+}
+
 export async function suggestSearchKeywords(rawSkill, llmConfig = null) {
 	if (!llmConfig?.apiKey) {
-		const parts = String(rawSkill).toLowerCase().split(/[^a-z0-9+#.]+/).filter(p => p.length > 1);
-		return { searchKeywords: [...new Set(parts)].slice(0, 5), usage: null };
+		return { searchKeywords: heuristicSearchKeywords(rawSkill), usage: null };
 	}
 
 	const { content, usage } = await chatCompletion({

@@ -3,13 +3,26 @@ import { normalizeSkillKey, stringSimilarity } from '../skillGraph/normalize.js'
 import { findExactMatch, searchCandidates } from '../skillGraph/search.js';
 import { applyEnrichmentResult, linkAlias } from '../skillGraph/apply.js';
 import { suggestSearchKeywords } from './keywordSuggest.js';
-import { enrichAgainstCandidates } from './enrich.js';
-import { isEnrichmentEnabled, getEnrichmentModel } from './config.js';
+import { enrichAgainstCandidates, buildHeuristicResult } from './enrich.js';
+import {
+	getEnrichmentModel,
+	getEnrichmentMode,
+	getFuzzyAliasThreshold,
+	getAmbiguousScoreRange,
+	isSmartEnrichmentMode,
+} from './config.js';
 import { traceSkill } from './trace.js';
 import { addUsage, EMPTY_USAGE } from '../llm/llmService.js';
 
-const AUTO_ALIAS_THRESHOLD = 0.95;
-const SKIP_KEYWORD_THRESHOLD = 0.95;
+function isAmbiguous(candidates, fuzzyThreshold) {
+	if (!candidates.length) return false;
+	const { min, max } = getAmbiguousScoreRange();
+	const top = candidates[0]?.score ?? 0;
+	if (top >= fuzzyThreshold) return false;
+	if (top < min) return false;
+	return candidates.filter(c => c.score >= min && c.score < max).length >= 1
+		&& (candidates.length >= 2 || top >= min);
+}
 
 /**
  * Process one raw skill through normalize → search → enrich → apply.
@@ -17,6 +30,8 @@ const SKIP_KEYWORD_THRESHOLD = 0.95;
  */
 export async function processEnrichmentItem(item, llmConfig = null, ctx = {}) {
 	const { surfaceForm, normalizedKey, cooccurringSkills = [] } = item;
+	const mode = ctx.mode || getEnrichmentMode();
+	const fuzzyThreshold = getFuzzyAliasThreshold();
 	let usage = EMPTY_USAGE();
 
 	traceSkill('start', {
@@ -24,6 +39,7 @@ export async function processEnrichmentItem(item, llmConfig = null, ctx = {}) {
 		surfaceForm,
 		normalizedKey,
 		cooccurringSkills,
+		mode,
 	});
 
 	const exact = await findExactMatch(normalizedKey);
@@ -36,7 +52,14 @@ export async function processEnrichmentItem(item, llmConfig = null, ctx = {}) {
 			confidence: 1,
 			source: 'exact',
 		});
-		return { skillId: exact.id, path: 'exact', action: 'alias', relationshipCount: 0, usage };
+		return {
+			skillId: exact.id,
+			path: 'exact',
+			enrichmentPath: 'exact',
+			action: 'alias',
+			relationshipCount: 0,
+			usage,
+		};
 	}
 
 	let candidates = await searchCandidates({
@@ -52,8 +75,8 @@ export async function processEnrichmentItem(item, llmConfig = null, ctx = {}) {
 		top: candidates.slice(0, 3).map(c => ({ id: c.id, label: c.label, score: c.score, matchType: c.matchType })),
 	});
 
-	if (candidates.length === 1 && candidates[0].score >= AUTO_ALIAS_THRESHOLD
-		&& stringSimilarity(surfaceForm, candidates[0].label) >= AUTO_ALIAS_THRESHOLD) {
+	if (candidates.length === 1 && candidates[0].score >= fuzzyThreshold
+		&& stringSimilarity(surfaceForm, candidates[0].label) >= fuzzyThreshold) {
 		traceSkill('fuzzy_auto_alias', { normalizedKey, skillId: candidates[0].id, score: candidates[0].score });
 		await linkAlias({
 			surfaceForm,
@@ -62,15 +85,22 @@ export async function processEnrichmentItem(item, llmConfig = null, ctx = {}) {
 			confidence: candidates[0].score,
 			source: 'fuzzy_auto',
 		});
-		return { skillId: candidates[0].id, path: 'fuzzy_auto', action: 'alias', relationshipCount: 0, usage };
+		return {
+			skillId: candidates[0].id,
+			path: 'fuzzy_auto',
+			enrichmentPath: 'fuzzy_auto',
+			action: 'alias',
+			relationshipCount: 0,
+			usage,
+		};
 	}
 
 	const topScore = candidates[0]?.score ?? 0;
 
-	if (topScore < SKIP_KEYWORD_THRESHOLD && isEnrichmentEnabled() && llmConfig?.apiKey) {
-		const { searchKeywords, usage: kwUsage } = await suggestSearchKeywords(surfaceForm, llmConfig);
-		usage = addUsage(usage, kwUsage);
-		traceSkill('keyword_suggest', { normalizedKey, searchKeywords, llmUsage: kwUsage });
+	if (topScore < fuzzyThreshold) {
+		const { searchKeywords, usage: kwUsage } = await suggestSearchKeywords(surfaceForm, null);
+		if (kwUsage) usage = addUsage(usage, kwUsage);
+		traceSkill('keyword_suggest', { normalizedKey, searchKeywords, llmUsage: kwUsage, heuristic: true });
 		if (searchKeywords.length) {
 			candidates = await searchCandidates({
 				rawSkill: surfaceForm,
@@ -86,43 +116,68 @@ export async function processEnrichmentItem(item, llmConfig = null, ctx = {}) {
 		}
 	}
 
-	const { result, usage: enrichUsage } = await enrichAgainstCandidates({
-		rawSkill: surfaceForm,
-		normalizedKey,
-		candidates,
-		cooccurringSkills,
-		llmConfig,
-	});
-	usage = addUsage(usage, enrichUsage);
+	const useLlm = mode === 'smart'
+		&& isSmartEnrichmentMode()
+		&& isAmbiguous(candidates, fuzzyThreshold)
+		&& llmConfig?.apiKey;
 
-	traceSkill('llm_decision', {
-		normalizedKey,
-		action: result.action,
-		targetId: result.targetId,
-		confidence: result.confidence,
-		skillType: result.skillType,
-		category: result.category,
-		newNodeLabel: result.newNode?.label,
-		relationships: result.relationships,
-		llmUsage: usage,
-	});
+	let result;
+	let enrichUsage = null;
+	let enrichmentPath = 'heuristic';
+
+	if (useLlm) {
+		const enriched = await enrichAgainstCandidates({
+			rawSkill: surfaceForm,
+			normalizedKey,
+			candidates,
+			cooccurringSkills,
+			llmConfig,
+		});
+		result = enriched.result;
+		enrichUsage = enriched.usage;
+		usage = addUsage(usage, enrichUsage);
+		enrichmentPath = 'llm';
+		traceSkill('llm_decision', {
+			normalizedKey,
+			action: result.action,
+			targetId: result.targetId,
+			confidence: result.confidence,
+			skillType: result.skillType,
+			category: result.category,
+			newNodeLabel: result.newNode?.label,
+			relationships: result.relationships,
+			llmUsage: usage,
+		});
+	} else {
+		const heuristic = buildHeuristicResult(surfaceForm, normalizedKey, candidates, fuzzyThreshold);
+		result = heuristic.result;
+		traceSkill('heuristic_decision', {
+			normalizedKey,
+			action: result.action,
+			targetId: result.targetId,
+			candidateCount: candidates.length,
+		});
+	}
 
 	const applied = await applyEnrichmentResult({
 		surfaceForm,
 		normalizedKey,
 		result,
-		modelVersion: getEnrichmentModel('enrich', llmConfig),
+		modelVersion: useLlm ? getEnrichmentModel('enrich', llmConfig) : 'heuristic-v1',
 	});
+
+	const path = enrichmentPath === 'llm' ? 'enriched' : 'heuristic';
 
 	traceSkill('applied', {
 		normalizedKey,
 		surfaceForm,
 		...applied,
-		path: 'enriched',
+		path,
+		enrichmentPath,
 		usage,
 	});
 
-	return { ...applied, path: 'enriched', usage };
+	return { ...applied, path, enrichmentPath, usage };
 }
 
 /** Enrich every distinct entry in job.skills[] (not job.description). */

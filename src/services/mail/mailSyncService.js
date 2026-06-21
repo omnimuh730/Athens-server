@@ -2,62 +2,93 @@ import { resolveMailCredentials } from './credentials.js';
 import {
 	fetchFlagsForUids,
 	fetchMessageBody,
+	fetchMailboxPage,
 	fetchNewEnvelopes,
-	fetchOlderEnvelopes,
-	fetchRecentEnvelopes,
+	fetchFolderCounts,
 } from './imapClient.js';
 import {
 	acquireSyncLock,
 	canSync,
-	getInitialSyncSize,
-	getOlderBatchSize,
+	countMessages,
 	getRecentUidsForFlagRefresh,
 	getSyncState,
+	listMessages,
 	releaseSyncLock,
 	upsertMessages,
 	upsertSyncState,
+	getCachedMessageCount,
+	messageToThread,
 } from './mailStore.js';
 
-export async function runInitialSync(applierName, { force = false } = {}) {
+/**
+ * Fetch one folder page from Gmail if not fully cached; returns threads + total.
+ */
+export async function loadFolderPage(applierName, folder, page, pageSize) {
 	const creds = await resolveMailCredentials(applierName);
 	if (!creds.ok) return { ok: false, error: creds.error };
 
-	const state = await getSyncState(applierName);
-	if (state.initialSyncComplete && !force) {
-		return { ok: true, skipped: true, message: 'Initial sync already complete' };
-	}
-
-	if (!(await canSync(applierName, force))) {
-		return { ok: true, skipped: true, message: 'Sync throttled' };
-	}
-
-	if (!(await acquireSyncLock(applierName))) {
-		return { ok: true, skipped: true, message: 'Sync already in progress' };
-	}
-
 	try {
-		const count = getInitialSyncSize();
-		const { messages, highestUid, lowestUid } = await fetchRecentEnvelopes(
+		const { messages, total } = await fetchMailboxPage(
 			creds.email,
 			creds.password,
-			count,
+			folder,
+			page,
+			pageSize,
 			applierName,
 		);
 
-		const { upserted } = await upsertMessages(messages);
+		if (messages.length) {
+			const uids = messages.map((m) => m.uid);
+			const cached = await getCachedMessageCount(applierName, uids);
+			if (cached < uids.length) {
+				await upsertMessages(messages);
+			}
+		}
 
-		await releaseSyncLock(applierName, {
-			highestUid: Math.max(state.highestUid, highestUid),
-			oldestCachedUid: lowestUid || state.oldestCachedUid,
-			initialSyncComplete: true,
-			lastImapSyncAt: new Date(),
-			lastError: null,
+		await upsertSyncState(applierName, {
+			[`folderTotal_${folder}`]: total,
+			folderCountsUpdatedAt: new Date(),
 		});
 
-		return { ok: true, newCount: upserted, highestUid, lowestUid };
+		return {
+			ok: true,
+			threads: messages.map(messageToThread),
+			total,
+			page,
+			pageSize,
+		};
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		await releaseSyncLock(applierName, { lastError: message });
+		return { ok: false, error: message };
+	}
+}
+
+export async function loadLabelOrSearchPage(applierName, { folder, label, search, page, pageSize }) {
+	const total = await countMessages(applierName, { folder, label, search });
+	const docs = await listMessages(applierName, { folder, label, search, page, pageSize });
+	return {
+		ok: true,
+		threads: docs.map(messageToThread),
+		total,
+		page,
+		pageSize,
+	};
+}
+
+export async function getFolderCounts(applierName) {
+	const creds = await resolveMailCredentials(applierName);
+	if (!creds.ok) return { ok: false, error: creds.error };
+
+	try {
+		const counts = await fetchFolderCounts(creds.email, creds.password);
+		await upsertSyncState(applierName, { folderCounts: counts, folderCountsUpdatedAt: new Date() });
+		return { ok: true, counts };
+	} catch (err) {
+		const state = await getSyncState(applierName);
+		if (state.folderCounts) {
+			return { ok: true, counts: state.folderCounts, cached: true };
+		}
+		const message = err instanceof Error ? err.message : String(err);
 		return { ok: false, error: message };
 	}
 }
@@ -76,19 +107,13 @@ export async function runIncrementalSync(applierName, { force = false } = {}) {
 
 	try {
 		const state = await getSyncState(applierName);
-
-		if (!state.initialSyncComplete) {
-			await releaseSyncLock(applierName);
-			return runInitialSync(applierName, { force });
-		}
-
 		let newCount = 0;
 		let updatedCount = 0;
 
 		const { messages, highestUid } = await fetchNewEnvelopes(
 			creds.email,
 			creds.password,
-			state.highestUid,
+			state.highestUid || 0,
 			applierName,
 		);
 		if (messages.length) {
@@ -111,9 +136,10 @@ export async function runIncrementalSync(applierName, { force = false } = {}) {
 		}
 
 		await releaseSyncLock(applierName, {
-			highestUid: Math.max(state.highestUid, highestUid),
+			highestUid: Math.max(state.highestUid || 0, highestUid),
 			lastImapSyncAt: new Date(),
 			lastError: null,
+			initialSyncComplete: true,
 		});
 
 		return { ok: true, newCount, updatedCount };
@@ -124,48 +150,14 @@ export async function runIncrementalSync(applierName, { force = false } = {}) {
 	}
 }
 
+/** @deprecated Use loadFolderPage instead */
+export async function runInitialSync(applierName, opts = {}) {
+	return loadFolderPage(applierName, 'inbox', 1, 25);
+}
+
+/** @deprecated Use loadFolderPage instead */
 export async function runOlderSync(applierName, batchSize) {
-	const creds = await resolveMailCredentials(applierName);
-	if (!creds.ok) return { ok: false, error: creds.error };
-
-	const state = await getSyncState(applierName);
-	if (!state.initialSyncComplete) {
-		return runInitialSync(applierName);
-	}
-
-	const beforeUid = state.oldestCachedUid;
-	if (!beforeUid || beforeUid <= 1) {
-		return { ok: true, newCount: 0, hasMore: false };
-	}
-
-	if (!(await acquireSyncLock(applierName))) {
-		return { ok: true, skipped: true, newCount: 0 };
-	}
-
-	try {
-		const size = batchSize || getOlderBatchSize();
-		const { messages, hasMore, lowestUid } = await fetchOlderEnvelopes(
-			creds.email,
-			creds.password,
-			beforeUid,
-			size,
-			applierName,
-		);
-
-		const { upserted } = await upsertMessages(messages);
-
-		await releaseSyncLock(applierName, {
-			oldestCachedUid: lowestUid < beforeUid ? lowestUid : state.oldestCachedUid,
-			lastImapSyncAt: new Date(),
-			lastError: null,
-		});
-
-		return { ok: true, newCount: upserted, hasMore };
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		await releaseSyncLock(applierName, { lastError: message });
-		return { ok: false, error: message };
-	}
+	return { ok: true, newCount: 0, hasMore: false };
 }
 
 export async function ensureMessageBody(applierName, uid) {
@@ -174,7 +166,7 @@ export async function ensureMessageBody(applierName, uid) {
 
 	const { getMessage, updateMessageBody } = await import('./mailStore.js');
 	const existing = await getMessage(applierName, uid);
-	if (existing?.hasBody && existing.bodyText) {
+	if (existing?.hasBody && existing.bodyHtml) {
 		return { ok: true, message: existing };
 	}
 
@@ -195,5 +187,22 @@ export async function ensureMessageBody(applierName, uid) {
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		return { ok: false, error: message };
+	}
+}
+
+/** Prefetch bodies for visible page (background). */
+export async function prefetchMessageBodies(applierName, uids) {
+	const creds = await resolveMailCredentials(applierName);
+	if (!creds.ok) return;
+
+	const { getMessage } = await import('./mailStore.js');
+	for (const uid of uids.slice(0, 10)) {
+		const existing = await getMessage(applierName, uid);
+		if (existing?.hasBody) continue;
+		try {
+			await ensureMessageBody(applierName, uid);
+		} catch {
+			// best effort
+		}
 	}
 }
