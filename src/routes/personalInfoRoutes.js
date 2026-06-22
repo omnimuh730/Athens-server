@@ -14,9 +14,10 @@ import {
 } from "../controllers/personalInfoController.js";
 import {
 	getLlmModels,
-	generateResume,
-	generateResumeStream,
-	getGeneratorConfig,
+  generateResume,
+  generateResumeStream,
+  generateResumeForAgentJob,
+  getGeneratorConfig,
 	saveGeneratorConfig,
   listGenerations,
   getGeneration,
@@ -54,6 +55,7 @@ router.post('/personal/resume-catalog/validate', validateResumeCatalogHandler);
 router.get('/personal/llm-models', getLlmModels);
 router.post('/personal/resume-generate', generateResume);
 router.post('/personal/resume-generate/stream', generateResumeStream);
+router.post('/personal/resume-generate/for-agent-job', generateResumeForAgentJob);
 router.get('/personal/resume-generator/config', getGeneratorConfig);
 router.put('/personal/resume-generator/config', saveGeneratorConfig);
 router.get('/personal/resume-generations', listGenerations);

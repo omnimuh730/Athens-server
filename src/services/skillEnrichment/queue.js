@@ -20,24 +20,32 @@ export async function enqueueSkills(rawSkills = [], cooccurringSkills = []) {
 		}
 
 		const now = new Date().toISOString();
-		const result = await skillEnrichmentQueueCollection.updateOne(
-			{ normalizedKey, status: { $in: ['pending', 'processing', 'failed'] } },
-			{
-				$setOnInsert: {
-					normalizedKey,
-					surfaceForm,
-					cooccurringSkills: cooc.filter(s => normalizeSkillKey(s) !== normalizedKey),
-					status: 'pending',
-					attempts: 0,
-					createdAt: now,
+		try {
+			const result = await skillEnrichmentQueueCollection.updateOne(
+				{ normalizedKey, status: { $in: ['pending', 'processing', 'failed'] } },
+				{
+					$setOnInsert: {
+						normalizedKey,
+						surfaceForm,
+						cooccurringSkills: cooc.filter(s => normalizeSkillKey(s) !== normalizedKey),
+						status: 'pending',
+						attempts: 0,
+						createdAt: now,
+					},
+					$set: { updatedAt: now },
 				},
-				$set: { updatedAt: now },
-			},
-			{ upsert: true },
-		);
+				{ upsert: true },
+			);
 
-		if (result.upsertedCount > 0 || result.modifiedCount > 0) {
-			enqueued.push({ normalizedKey, surfaceForm });
+			if (result.upsertedCount > 0 || result.modifiedCount > 0) {
+				enqueued.push({ normalizedKey, surfaceForm });
+			}
+		} catch (err) {
+			// The unique index is on normalizedKey only, but this filter also matches on status,
+			// so a skill already at status "completed" doesn't match → the upsert tries to INSERT
+			// a duplicate normalizedKey (E11000). That just means the skill is already known —
+			// skip it instead of throwing and failing the caller (e.g. résumé generation).
+			if (err?.code !== 11000) throw err;
 		}
 	}
 

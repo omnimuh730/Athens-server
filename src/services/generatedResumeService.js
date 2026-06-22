@@ -40,6 +40,7 @@ export async function syncGeneratedResumeAfterRun({
   skillProfile,
   techStack,
   skillAnalysisError,
+  generateParentJobId,
 }) {
   if (!userResumesCollection || !sections || !ownerName) return null;
 
@@ -58,6 +59,7 @@ export async function syncGeneratedResumeAfterRun({
   }
 
   const buffer = Buffer.from(extractedText || "Generated resume", "utf8");
+  const parentJobId = cleanString(generateParentJobId) || null;
   const doc = {
     ownerId,
     ownerName,
@@ -71,6 +73,7 @@ export async function syncGeneratedResumeAfterRun({
     extractedText,
     source: "generated",
     generationId: generationId ? String(generationId) : null,
+    generateParentJobId: parentJobId,
     templateId: templateId ?? null,
     isPrimary: false,
     analyzed,
@@ -100,6 +103,7 @@ export async function syncGeneratedResumeAfterRun({
             analyzedAt: analyzed ? now : null,
             analysisError: skillAnalysisError ?? null,
             templateId: templateId ?? null,
+            generateParentJobId: parentJobId ?? existing.generateParentJobId ?? null,
             updatedAt: now,
             contentBase64: doc.contentBase64,
             sizeBytes: doc.sizeBytes,
@@ -107,6 +111,37 @@ export async function syncGeneratedResumeAfterRun({
         },
       );
       resumeId = existing._id;
+    }
+  }
+
+  if (parentJobId && userResumesCollection) {
+    const prior = await userResumesCollection.findOne({
+      ownerName,
+      generateParentJobId: parentJobId,
+      source: "generated",
+      ...(resumeId ? { _id: { $ne: resumeId } } : {}),
+    });
+    if (prior) {
+      await userResumesCollection.updateOne(
+        { _id: prior._id },
+        {
+          $set: {
+            techStack: stackLabel,
+            fileName,
+            extractedText,
+            skillProfile: profile,
+            analyzed,
+            analyzedAt: analyzed ? now : null,
+            analysisError: skillAnalysisError ?? null,
+            templateId: templateId ?? null,
+            generationId: generationId ? String(generationId) : prior.generationId,
+            updatedAt: now,
+            contentBase64: doc.contentBase64,
+            sizeBytes: doc.sizeBytes,
+          },
+        },
+      );
+      resumeId = prior._id;
     }
   }
 

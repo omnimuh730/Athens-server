@@ -687,3 +687,28 @@ export async function deleteGeneration(req, res) {
     return res.status(status).json({ success: false, error: msg });
   }
 }
+
+/** POST /personal/resume-generate/for-agent-job — agent autobid per-job resume (reuse or generate). */
+export async function generateResumeForAgentJob(req, res) {
+  try {
+    const body = req.body || {};
+    const applierName = cleanString(body.applierName);
+    const jobId = cleanString(body.jobId);
+    const jobDescription = cleanString(body.jobDescription);
+    if (!applierName) return res.status(400).json({ success: false, error: "applierName is required" });
+    if (!jobId) return res.status(400).json({ success: false, error: "jobId is required" });
+    if (!jobDescription) return res.status(400).json({ success: false, error: "jobDescription is required" });
+
+    const modelOverride = cleanString(body.model);
+    const { ensureAgentJobResume } = await import("../services/agentResumeGenService.js");
+    const result = await ensureAgentJobResume({ applierName, jobId, jobDescription, modelOverride });
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    const status = Number.isInteger(err?.status) ? err.status : 500;
+    console.warn(`POST /api/personal/resume-generate/for-agent-job failed (${status}): ${err.message}`);
+    return res.status(status === 429 ? 429 : status >= 400 && status < 600 ? status : 500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+}

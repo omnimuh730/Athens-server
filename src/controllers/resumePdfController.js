@@ -73,49 +73,46 @@ ${links}
 </html>`;
 }
 
+/**
+ * Render résumé body HTML to a PDF Buffer with the SAME paged Chromium pipeline the Profile
+ * page uses (so server-generated agent résumés match the preview output). Reusable by the
+ * route handler and the agent résumé service.
+ */
+export async function htmlToPdf({ html, paper = "letter", marginInches, font, baseSizePt, fontLinks } = {}) {
+	const body = typeof html === "string" ? html : "";
+	if (!body.trim()) throw new Error("html is required");
+	const doc = buildHtmlDocument({ html: body, paper: paper === "a4" ? "a4" : "letter", marginInches, font, baseSizePt, fontLinks });
+	const browser = await getBrowser();
+	const page = await browser.newPage();
+	try {
+		await page.setContent(doc, { waitUntil: "networkidle0", timeout: 30000 });
+		await page.evaluate(async () => { if (document.fonts && document.fonts.ready) await document.fonts.ready; });
+		return await page.pdf({ printBackground: true, preferCSSPageSize: true });
+	} finally {
+		await page.close().catch(() => {});
+	}
+}
+
 /** POST /personal/resume-pdf — render the preview DOM to a downloadable PDF. */
 export async function renderResumePdf(req, res) {
-	let page;
 	try {
 		const body = req.body || {};
-		const html = typeof body.html === "string" ? body.html : "";
-		if (!html.trim()) {
-			return res.status(400).json({ success: false, error: "html is required" });
-		}
-		const paper = body.paper === "a4" ? "a4" : "letter";
-		const doc = buildHtmlDocument({
-			html,
-			paper,
+		const pdf = await htmlToPdf({
+			html: typeof body.html === "string" ? body.html : "",
+			paper: body.paper === "a4" ? "a4" : "letter",
 			marginInches: Number(body.marginInches),
 			font: body.font,
 			baseSizePt: Number(body.baseSizePt),
 			fontLinks: body.fontLinks,
 		});
-
-		const browser = await getBrowser();
-		page = await browser.newPage();
-		await page.setContent(doc, { waitUntil: "networkidle0", timeout: 30000 });
-		// Make sure web fonts have settled before snapshotting.
-		await page.evaluate(async () => {
-			if (document.fonts && document.fonts.ready) await document.fonts.ready;
-		});
-
-		const pdf = await page.pdf({
-			printBackground: true,
-			preferCSSPageSize: true,
-		});
-
 		const rawName = String(body.fileName || "resume.pdf").replace(/[^\w.\- ]+/g, "_");
 		const fileName = rawName.toLowerCase().endsWith(".pdf") ? rawName : `${rawName}.pdf`;
-
 		res.setHeader("Content-Type", "application/pdf");
 		res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
 		res.setHeader("Content-Length", pdf.length);
 		return res.end(pdf);
 	} catch (err) {
 		console.error("POST /api/personal/resume-pdf failed:", err.message);
-		return res.status(500).json({ success: false, error: err.message });
-	} finally {
-		if (page) await page.close().catch(() => {});
+		return res.status(err.message === "html is required" ? 400 : 500).json({ success: false, error: err.message });
 	}
 }
