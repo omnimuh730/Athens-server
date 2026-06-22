@@ -20,7 +20,7 @@ import {
 	getEnrichmentMode,
 } from './config.js';
 import { addUsage, EMPTY_USAGE } from '../llm/llmService.js';
-import { syncCooccurrenceToGraph } from '../skillCooccurrence/index.js';
+import { syncCooccurrenceToGraph, retryCooccurrenceForKey } from '../skillCooccurrence/index.js';
 import { invalidateWorldGraphCache } from '../skillGraph/worldGraph.js';
 
 let activeSession = null;
@@ -74,6 +74,7 @@ async function runSessionLoop(session) {
 						relationshipCount: result.relationshipCount ?? 0,
 						usage: result.usage,
 					});
+					await retryCooccurrenceForKey(item.normalizedKey).catch(() => undefined);
 					session.processed += 1;
 					session.usage = addUsage(session.usage, result.usage);
 					if (result.skillId) {

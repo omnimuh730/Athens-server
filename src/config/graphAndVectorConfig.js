@@ -220,3 +220,49 @@ export function getEmbeddingDimensionsForProvider() {
 	}
 	return envInt('EMBEDDING_DIMENSIONS', 1024);
 }
+
+// ── Neo4j GDS (path scoring + link prediction) ───────────────────────────────
+
+export function getGdsGraphName() {
+	return envString('NEO4J_GDS_GRAPH_NAME', 'skill-graph');
+}
+
+export function getKgLinkPredictionMinScore() {
+	return envFloat('KG_LINK_PREDICTION_MIN_SCORE', 0.6);
+}
+
+export function getKgPathScoreMode() {
+	return envString('KG_PATH_SCORE_MODE', 'inverse_cost');
+}
+
+export function getKgPathHopDecay() {
+	return envFloat('KG_PATH_HOP_DECAY', 0.85);
+}
+
+export function getKgGdsFallbackToCypher() {
+	return process.env.KG_GDS_FALLBACK_TO_CYPHER !== 'false';
+}
+
+export function getGdsRefreshDebounceMs() {
+	return envInt('NEO4J_GDS_REFRESH_DEBOUNCE_MS', 30_000);
+}
+
+export function getSkillGraphMaintenanceEnabled() {
+	return process.env.SKILL_GRAPH_MAINTENANCE_ENABLED !== 'false';
+}
+
+export function getSkillGraphMaintenanceIntervalMs() {
+	return envInt('SKILL_GRAPH_MAINTENANCE_INTERVAL_MS', 15_000);
+}
+
+export function getSkillGraphLinkPredictionIntervalMs() {
+	return envInt('SKILL_GRAPH_LINK_PREDICTION_INTERVAL_MS', 300_000);
+}
+
+export function getSkillGraphBridgeLlmEnabled() {
+	return process.env.SKILL_GRAPH_BRIDGE_LLM_ENABLED === 'true';
+}
+
+export function getSkillGraphMaintenanceBatchSize() {
+	return envInt('SKILL_GRAPH_MAINTENANCE_BATCH_SIZE', 5);
+}

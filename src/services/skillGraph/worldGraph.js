@@ -2,6 +2,7 @@ import { isNeo4jReady, runReadBatch, toNeo4jInt } from '../../db/neo4j.js';
 import { getKgConfidenceDefaultEdgeWeight } from '../../config/graphAndVectorConfig.js';
 import { RELATION_TYPES } from '../skillGraph/search.js';
 import { mapToSkillCategory } from './categoryMap.js';
+import { scheduleGdsRefresh } from './gds.js';
 
 const DEFAULT_NODE_LIMIT = 2000;
 const DEFAULT_EDGE_LIMIT = 5000;
@@ -105,4 +106,5 @@ export async function fetchWorldGraph({ nodeLimit = DEFAULT_NODE_LIMIT, edgeLimi
 /** Invalidate cached world graph (e.g. after enrichment writes). */
 export function invalidateWorldGraphCache() {
 	graphCache.clear();
+	scheduleGdsRefresh();
 }

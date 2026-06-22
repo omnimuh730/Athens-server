@@ -4,12 +4,9 @@
 import { isNeo4jReady } from '../../db/neo4j.js';
 import { normalizeSkillKey, toComparable } from '../skillGraph/normalize.js';
 import { resolveMany } from '../skillGraph/resolve.js';
+import { computeBestPathMatch } from '../skillGraph/gds.js';
 import { fetchSubgraph } from '../skillGraph/search.js';
 import { computeActivation, getDirectMatchWeights } from '../skillGraph/activation.js';
-import {
-	getKgConfidenceUnknownRelation,
-} from '../../config/graphAndVectorConfig.js';
-import { runRead } from '../../db/neo4j.js';
 
 function clampPercentage(value) {
 	if (!Number.isFinite(value)) return 0;
@@ -50,32 +47,8 @@ async function directGraphMatchWeight(jobCanonicalId, userCanonicalIds) {
 	if (userCanonicalIds.has(jobCanonicalId)) return directMatchWeights.direct;
 	if (!isNeo4jReady()) return 0;
 
-	const records = await runRead(
-		`
-		MATCH (j:Skill { id: $jobId })
-		MATCH (u:Skill) WHERE u.id IN $userIds
-		OPTIONAL MATCH path = shortestPath((j)-[*..3]-(u))
-		WHERE ALL(rel IN relationships(path) WHERE type(rel) IN [
-		  'BUILDS_ON','PREREQUISITE_OF','SPECIALIZATION_OF','RELATED_TO','USED_WITH','ALTERNATIVE_TO','PART_OF'
-		])
-		WITH j, u, path,
-		     [r IN relationships(path) | type(r)] AS relTypes
-		RETURN u.id AS userId, relTypes
-		LIMIT 20
-		`,
-		{ jobId: jobCanonicalId, userIds: [...userCanonicalIds] },
-	);
-
-	let best = 0;
-	const unknownRelationWeight = getKgConfidenceUnknownRelation();
-	for (const r of records) {
-		const relTypes = r.get('relTypes') || [];
-		for (const t of relTypes) {
-			const w = directMatchWeights[t] ?? unknownRelationWeight;
-			best = Math.max(best, w);
-		}
-	}
-	return best;
+	const pathMatch = await computeBestPathMatch(jobCanonicalId, [...userCanonicalIds]);
+	return pathMatch?.similarity ?? 0;
 }
 
 async function scoreWithActivation(jobCanonicalIds, userCanonicalIds, userGraphSkills = []) {

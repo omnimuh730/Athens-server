@@ -9,6 +9,7 @@ import { initMongo } from "./src/db/mongo.js";
 import { initNeo4j } from "./src/db/neo4j.js";
 import { initSocket } from "./src/socketHub.js";
 import { startJobAnalysisWorker } from "./src/services/jobAnalysis/index.js";
+import { startSkillGraphMaintenanceWorker } from "./src/services/skillGraph/maintenanceWorker.js";
 import { initQdrantCollections } from "./src/services/vectorStore/qdrantClient.js";
 import { checkOllamaEmbeddingReady } from "./src/services/embeddings/embeddingService.js";
 
@@ -45,6 +46,7 @@ async function bootstrap() {
 	try {
 		await initNeo4j();
 		startJobAnalysisWorker();
+		startSkillGraphMaintenanceWorker();
 	} catch (err) {
 		console.error('Neo4j connection failed — skill graph enrichment disabled until fixed:', err.message);
 		if (process.env.NEO4J_REQUIRED === 'true') {

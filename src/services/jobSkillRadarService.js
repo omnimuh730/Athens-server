@@ -4,15 +4,18 @@ import {
 	userKnowledgeGraphsCollection,
 	userResumesCollection,
 } from '../db/mongo.js';
-import { isNeo4jReady, runRead } from '../db/neo4j.js';
+import { isNeo4jReady } from '../db/neo4j.js';
 import { normalizeSkillKey, toComparable } from '../services/skillGraph/normalize.js';
 import { resolveMany } from '../services/skillGraph/resolve.js';
-import { getDirectMatchWeights } from '../services/skillGraph/activation.js';
-import {
-	getKgConfidenceUnknownRelation,
-} from '../config/graphAndVectorConfig.js';
+import { computeBestPathMatch } from '../services/skillGraph/gds.js';
 import { PROFILE_GRAPH_ID } from '../services/userKnowledgeGraph/index.js';
 import { rankResumesForJob } from '../services/recommendation/vectorRetrieval.js';
+import { loadResumeVectorEntries, cosineSimilarity } from '../services/recommendation/vectorRetrieval.js';
+import { getJobVector } from '../services/vectorStore/qdrantClient.js';
+import { upsertJobEmbedding } from '../services/embeddings/embeddingIngest.js';
+import { computeGraphBoost } from '../services/recommendation/graphRankBoost.js';
+import { getMatchScoreWeights } from '../config/graphAndVectorConfig.js';
+import { queueJobAnalysis } from '../services/jobAnalysis/index.js';
 
 const MAX_RADAR_AXES = 12;
 const REQUIRED_SCORE = 100;
@@ -59,50 +62,23 @@ async function findGraphUserMatch(jobCanonicalId, userSkills = []) {
 	if (!userWithCanonical.length) return null;
 
 	const userIds = userWithCanonical.map((s) => s.canonicalId);
-	const records = await runRead(
-		`
-		MATCH (j:Skill { id: $jobId })
-		MATCH (u:Skill) WHERE u.id IN $userIds
-		OPTIONAL MATCH path = shortestPath((j)-[*..3]-(u))
-		WHERE ALL(rel IN relationships(path) WHERE type(rel) IN [
-		  'BUILDS_ON','PREREQUISITE_OF','SPECIALIZATION_OF','RELATED_TO','USED_WITH','ALTERNATIVE_TO','PART_OF'
-		])
-		WITH u, path,
-		     [r IN relationships(path) | type(r)] AS relTypes
-		RETURN u.id AS userId, relTypes
-		LIMIT 20
-		`,
-		{ jobId: jobCanonicalId, userIds },
-	);
+	const pathMatch = await computeBestPathMatch(jobCanonicalId, userIds);
+	if (!pathMatch?.userSkillId) return null;
 
-	let best = null;
-	const directMatchWeights = getDirectMatchWeights();
-	const unknownRelationWeight = getKgConfidenceUnknownRelation();
-	for (const r of records) {
-		const userId = r.get('userId');
-		const relTypes = r.get('relTypes') || [];
-		if (!userId || !relTypes.length) continue;
+	const userSkill = userWithCanonical.find((s) => s.canonicalId === pathMatch.userSkillId);
+	if (!userSkill) return null;
 
-		let weight = 0;
-		for (const t of relTypes) {
-			weight = Math.max(weight, directMatchWeights[t] ?? unknownRelationWeight);
-		}
-
-		const userSkill = userWithCanonical.find((s) => s.canonicalId === userId);
-		if (!userSkill) continue;
-
-		const userScore = clampScore(userSkillStrength(userSkill) * weight);
-		if (!best || userScore > best.userScore) {
-			best = {
-				userScore,
-				matchType: 'graph',
-				matchedVia: userSkill.surfaceForm || userSkill.name || userId,
-				weight,
-			};
-		}
-	}
-
-	return best;
+	const userScore = clampScore(userSkillStrength(userSkill) * pathMatch.similarity);
+	return {
+		userScore,
+		matchType: 'graph',
+		matchedVia: userSkill.surfaceForm || userSkill.name || pathMatch.userSkillId,
+		weight: pathMatch.similarity,
+		pathCost: pathMatch.pathCost,
+		pathHops: pathMatch.hops,
+		pathSkills: pathMatch.pathSkills,
+		pathRelTypes: pathMatch.pathRelTypes,
+	};
 }
 
 async function scoreJobSkillAxis(jobSkillLabel, resolved, userSkills) {
@@ -128,6 +104,10 @@ async function scoreJobSkillAxis(jobSkillLabel, resolved, userSkills) {
 			user: graph.userScore,
 			matchType: graph.matchType,
 			matchedVia: graph.matchedVia,
+			pathCost: graph.pathCost,
+			pathHops: graph.pathHops,
+			pathSkills: graph.pathSkills,
+			pathRelTypes: graph.pathRelTypes,
 		};
 	}
 
@@ -205,7 +185,7 @@ function pickDefaultResumeId(requestedResumeId, recommendedResumeId, recommended
 }
 
 /**
- * Fast vector-only resume pick for a job (JD header). O(resumes) cosine comparisons.
+ * Fast vector + graph resume pick for a job (JD header).
  */
 export async function buildJobResumeRank({ jobId, applierName }) {
 	const name = String(applierName || '').trim();
@@ -221,8 +201,57 @@ export async function buildJobResumeRank({ jobId, applierName }) {
 		};
 	}
 
+	const job = jobsCollection
+		? await jobsCollection.findOne(
+			{ _id: new ObjectId(jobId) },
+			{ projection: { skills: 1 } },
+		)
+		: null;
+	const jobSkills = Array.isArray(job?.skills) ? job.skills : [];
+
+	let jobVector = (await getJobVector(String(jobId)))?.vector;
+	if (!jobVector?.length) {
+		const embed = await upsertJobEmbedding(String(jobId), { applierName: name });
+		if (embed.ok) {
+			jobVector = (await getJobVector(String(jobId)))?.vector;
+		}
+	}
+
+	const resumeEntries = jobVector?.length ? await loadResumeVectorEntries(name) : [];
+	const weights = getMatchScoreWeights();
+
+	let bestResumeId = null;
+	let bestScore = -1;
+	let bestLabel = null;
+
+	for (const resume of availableResumes) {
+		if (resume.resumeId === PROFILE_GRAPH_ID) continue;
+
+		const vectorEntry = resumeEntries.find((e) => e.resumeId === resume.resumeId);
+		const vectorScore = vectorEntry && jobVector?.length
+			? cosineSimilarity(jobVector, vectorEntry.vector)
+			: 0;
+
+		let graphBoost = 0;
+		if (jobSkills.length && isNeo4jReady()) {
+			const userSkills = await loadUserGraphSkills(name, resume.resumeId);
+			if (userSkills.length) {
+				graphBoost = await computeGraphBoost(jobSkills, userSkills);
+			}
+		}
+
+		const combined = vectorScore * weights.vector + (graphBoost / 100) * weights.graph;
+		if (combined > bestScore) {
+			bestScore = combined;
+			bestResumeId = resume.resumeId;
+			bestLabel = resume.label;
+		}
+	}
+
 	const vectorRank = await rankResumesForJob(String(jobId), name);
-	const recommendedResumeId = vectorRank?.resumeId
+
+	const recommendedResumeId = bestResumeId
+		?? vectorRank?.resumeId
 		?? availableResumes.find((r) => r.resumeId !== PROFILE_GRAPH_ID)?.resumeId
 		?? availableResumes[0]?.resumeId
 		?? null;
@@ -230,7 +259,8 @@ export async function buildJobResumeRank({ jobId, applierName }) {
 	return {
 		availableResumes,
 		recommendedResumeId,
-		recommendedResumeTechStack: vectorRank?.techStack
+		recommendedResumeTechStack: bestLabel
+			?? vectorRank?.techStack
 			?? availableResumes.find((r) => r.resumeId === recommendedResumeId)?.label
 			?? null,
 	};
@@ -258,6 +288,11 @@ export async function buildJobSkillRadar({
 
 	const job = await jobsCollection.findOne({ _id: new ObjectId(jobId) });
 	if (!job) throw new Error('Job not found');
+
+	const analysisStatus = job.skillAnalysis?.status;
+	if (analysisStatus !== 'analyzed' && analysisStatus !== 'queued' && analysisStatus !== 'analyzing') {
+		void queueJobAnalysis(String(jobId), name).catch(() => undefined);
+	}
 
 	const availableResumes = await loadAvailableResumes(name);
 	if (!availableResumes.length) {
@@ -331,5 +366,6 @@ export async function buildJobSkillRadar({
 			?? availableResumes.find((r) => r.resumeId === resolvedRecommendedId)?.label
 			?? null,
 		neo4jReady: isNeo4jReady(),
+		skillAnalysisStatus: job.skillAnalysis?.status ?? 'pending',
 	};
 }

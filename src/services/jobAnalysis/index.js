@@ -3,7 +3,7 @@ import { jobsCollection } from '../../db/mongo.js';
 import { isNeo4jReady } from '../../db/neo4j.js';
 import { normalizeSkillKey, normalizeSurfaceForm } from '../skillGraph/normalize.js';
 import { enrichSkillList, getGraphCounts } from '../skillEnrichment/processSkill.js';
-import { recordCooccurrenceForJob } from '../skillCooccurrence/index.js';
+import { recordCooccurrenceForJob, retryCooccurrenceForKey } from '../skillCooccurrence/index.js';
 import { attachStaticScoreFields } from '../jobListPipeline.js';
 import { upsertJobEmbeddingAsync } from '../embeddings/embeddingIngest.js';
 import {
@@ -134,6 +134,11 @@ async function runJobAnalysis(job) {
 		enrichmentResults = enriched.results;
 		llmUsage = enriched.usage;
 		coocStats = await recordCooccurrenceForJob(skills, { jobId });
+		for (const r of enrichmentResults) {
+			if (r.normalizedKey) {
+				await retryCooccurrenceForKey(r.normalizedKey).catch(() => undefined);
+			}
+		}
 	}
 
 	const staticScores = attachStaticScoreFields({ ...job, skills });

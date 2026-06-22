@@ -100,9 +100,40 @@ export async function syncCooccurrenceToGraph(limit = 100) {
 
 	let synced = 0;
 	for (const pair of pairs) {
-		await promoteCooccurrenceToGraph(pair.keyA, pair.keyB, pair.count);
-		await skillCooccurrenceCollection.updateOne({ _id: pair._id }, { $set: { synced: true } });
-		synced += 1;
+		const promoted = await promoteCooccurrenceToGraph(pair.keyA, pair.keyB, pair.count);
+		if (promoted) {
+			await skillCooccurrenceCollection.updateOne({ _id: pair._id }, { $set: { synced: true } });
+			synced += 1;
+		}
 	}
 	return synced;
+}
+
+/** Re-promote co-occurrence pairs involving a newly enriched skill key. */
+export async function retryCooccurrenceForKey(normalizedKey, limit = 100) {
+	if (!skillCooccurrenceCollection || !isNeo4jReady() || !normalizedKey) {
+		return { promoted: 0, scanned: 0 };
+	}
+
+	const key = String(normalizedKey).trim();
+	const pairs = await skillCooccurrenceCollection
+		.find({
+			count: { $gte: COOC_THRESHOLD },
+			$or: [{ keyA: key }, { keyB: key }],
+			synced: { $ne: true },
+		})
+		.limit(limit)
+		.toArray();
+
+	let promoted = 0;
+	for (const pair of pairs) {
+		const ok = await promoteCooccurrenceToGraph(pair.keyA, pair.keyB, pair.count);
+		if (ok) {
+			await skillCooccurrenceCollection.updateOne({ _id: pair._id }, { $set: { synced: true } });
+			promoted += 1;
+		}
+	}
+
+	traceCooccurrence('retry_for_key', { normalizedKey: key, scanned: pairs.length, promoted });
+	return { promoted, scanned: pairs.length };
 }

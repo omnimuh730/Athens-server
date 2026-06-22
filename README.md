@@ -17,6 +17,7 @@ Backend for **Athens** (NextOffer job search, resume analysis, skill graph, and 
 |---------|---------|
 | **MongoDB** | Jobs, resumes, accounts, user knowledge graphs |
 | **Neo4j** | Shared skill ontology (enrichment, graph re-rank) |
+| **Neo4j GDS** | Weighted path scoring (Dijkstra) + link prediction for missing edges |
 | **Qdrant** | Vector index for job + resume embeddings |
 | **Ollama** | Local embeddings (`mxbai-embed-large`, no API key) |
 | **Node.js + Express** | HTTP API and background workers |
@@ -30,7 +31,7 @@ When Job Search uses **Best match** (`sort=recommended`):
 1. Load analyzed resume + profile vectors for the applier (cached ~3 min)
 2. **Qdrant ring pagination** — fetch only the current page via vector similarity boundaries (`scoreAtRank`), not a full-catalog re-rank
 3. Apply Mongo filters on the page’s job IDs (status tab, title, company, etc.)
-4. Optional Neo4j graph boost on **the current page only** (~25 jobs), skipped when Neo4j is down
+4. Optional Neo4j graph boost on **the vector candidate pool** using GDS weighted paths (falls back to Cypher if GDS plugin missing)
 5. Return jobs with `matchScore`, `scoreSkill`, `bestResumeTechStack`, etc.
 
 Job vectors store `source` and `postedAt` in Qdrant payload for pre-filtering. Status-tab filters use a small Mongo `$in` on hydrated page IDs.
@@ -45,7 +46,7 @@ See [`idea.md`](../idea.md) in the repo root for the full design.
 
 - **Node.js** 18+ and npm
 - **MongoDB** running locally or remote
-- **Neo4j** (skill graph enrichment)
+- **Neo4j** (skill graph enrichment) — install **Graph Data Science** plugin for best path scoring
 - **Qdrant** (vector search) — Docker or binary
 - **Ollama** (embeddings) — [native macOS app](https://ollama.com) or Docker
 
@@ -112,6 +113,27 @@ QDRANT_URL=http://127.0.0.1:6333
 
 Collections `job_vectors` and `resume_vectors` are created automatically when Athens-server starts (1024 dimensions with default Ollama settings).
 
+### 3b. Neo4j + GDS (skill graph path scoring)
+
+For weighted path scoring and automatic link prediction, use Neo4j with the **Graph Data Science** plugin:
+
+```bash
+docker compose up -d neo4j
+# Browser: http://127.0.0.1:7474 — login neo4j / skillgraph-dev (or your NEO4J_PASSWORD)
+# Verify GDS: RETURN gds.version();
+```
+
+Or install GDS on an existing Neo4j Desktop / server instance. See [Neo4j GDS installation](https://neo4j.com/docs/graph-data-science/current/installation/).
+
+Without GDS, path scoring falls back to weighted Cypher (`KG_GDS_FALLBACK_TO_CYPHER=true`).
+
+**Background maintenance** (enabled by default) drains the pending skill queue, syncs co-occurrence pairs, and runs link prediction on an interval. One-time catch-up for existing data:
+
+```bash
+npm run backfill-graph-bridges
+npm run backfill-graph-bridges -- --link-prediction
+```
+
 ### 4. Backfill embeddings
 
 After Ollama and Qdrant are up, embed existing jobs and analyzed resumes:
@@ -146,6 +168,10 @@ Copy from [`.env.example`](.env.example). Key groups:
 | `EMBEDDING_PROVIDER` | `ollama` (default) or `openai` |
 | `OLLAMA_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS` | Local embeddings |
 | `RECOMMENDATION_VECTOR_TOP_K`, `RECOMMENDATION_CANDIDATE_POOL` | Retrieval tuning |
+| `NEO4J_GDS_GRAPH_NAME`, `KG_LINK_PREDICTION_MIN_SCORE`, `KG_PATH_HOP_DECAY` | GDS path scoring + link prediction |
+| `SKILL_GRAPH_MAINTENANCE_*`, `SKILL_GRAPH_BRIDGE_LLM_ENABLED` | Background graph completion |
+
+All KG tunables are documented in [`.env.example`](.env.example) and loaded via `src/config/graphAndVectorConfig.js`.
 
 **Optional OpenAI embeddings** (requires `openaiApiKey` in `account_info.autoBidProfile`):
 
@@ -171,6 +197,7 @@ Switching embedding provider or dimensions requires **re-backfilling** all vecto
 | `npm run backfill-job-embeddings` | Embed all jobs into Qdrant |
 | `npm run backfill-resume-embeddings` | Embed all analyzed resumes into Qdrant |
 | `npm run reset-skill-graph` | Reset Neo4j skill graph (destructive) |
+| `npm run backfill-graph-bridges` | Drain pending queue + co-oc backfill + GDS refresh |
 
 ---
 
@@ -227,12 +254,13 @@ Athens-server/
 
 ## Docker Compose
 
-[`docker-compose.yml`](docker-compose.yml) defines **Qdrant** and **Ollama**. You can run either service alone:
+[`docker-compose.yml`](docker-compose.yml) defines **Neo4j (GDS)**, **Qdrant**, and **Ollama**. You can run services alone:
 
 ```bash
+docker compose up -d neo4j           # skill graph + GDS
 docker compose up -d qdrant          # vectors only
 docker compose up -d ollama          # embeddings only (if not using native Ollama)
-docker compose up -d                 # both
+docker compose up -d                 # all
 ```
 
 Native Ollama on macOS is usually simpler than running Ollama in Docker.

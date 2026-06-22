@@ -1,7 +1,7 @@
 import {
 	getJobListScoreWeights,
 	getMatchScoreWeights,
-} from '../config/graphAndVectorConfig.js';
+} from '../../config/graphAndVectorConfig.js';
 import {
 	applicantScoreFromJob,
 	salaryScoreFromJob,

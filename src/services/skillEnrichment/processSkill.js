@@ -3,6 +3,7 @@ import { getKgConfidenceAliasExact } from '../../config/graphAndVectorConfig.js'
 import { normalizeSkillKey, stringSimilarity } from '../skillGraph/normalize.js';
 import { findExactMatch, searchCandidates } from '../skillGraph/search.js';
 import { applyEnrichmentResult, linkAlias } from '../skillGraph/apply.js';
+import { bridgeCooccurringSkills } from './bridgeCooccurringSkills.js';
 import { suggestSearchKeywords } from './keywordSuggest.js';
 import { enrichAgainstCandidates, buildHeuristicResult } from './enrich.js';
 import {
@@ -53,12 +54,13 @@ export async function processEnrichmentItem(item, llmConfig = null, ctx = {}) {
 			confidence: getKgConfidenceAliasExact(),
 			source: 'exact',
 		});
+		const bridgeCount = await bridgeCooccurringSkills(exact.id, normalizedKey, cooccurringSkills);
 		return {
 			skillId: exact.id,
 			path: 'exact',
 			enrichmentPath: 'exact',
 			action: 'alias',
-			relationshipCount: 0,
+			relationshipCount: bridgeCount,
 			usage,
 		};
 	}
@@ -86,12 +88,13 @@ export async function processEnrichmentItem(item, llmConfig = null, ctx = {}) {
 			confidence: candidates[0].score,
 			source: 'fuzzy_auto',
 		});
+		const bridgeCount = await bridgeCooccurringSkills(candidates[0].id, normalizedKey, cooccurringSkills);
 		return {
 			skillId: candidates[0].id,
 			path: 'fuzzy_auto',
 			enrichmentPath: 'fuzzy_auto',
 			action: 'alias',
-			relationshipCount: 0,
+			relationshipCount: bridgeCount,
 			usage,
 		};
 	}
@@ -167,18 +170,27 @@ export async function processEnrichmentItem(item, llmConfig = null, ctx = {}) {
 		modelVersion: useLlm ? getEnrichmentModel('enrich', llmConfig) : 'heuristic-v1',
 	});
 
+	const bridgeCount = await bridgeCooccurringSkills(
+		applied.skillId,
+		normalizedKey,
+		cooccurringSkills,
+	);
+	const totalRelationships = (applied.relationshipCount ?? 0) + bridgeCount;
+
 	const path = enrichmentPath === 'llm' ? 'enriched' : 'heuristic';
 
 	traceSkill('applied', {
 		normalizedKey,
 		surfaceForm,
 		...applied,
+		relationshipCount: totalRelationships,
+		coocBridgeCount: bridgeCount,
 		path,
 		enrichmentPath,
 		usage,
 	});
 
-	return { ...applied, path, enrichmentPath, usage };
+	return { ...applied, relationshipCount: totalRelationships, path, enrichmentPath, usage };
 }
 
 /** Enrich every distinct entry in job.skills[] (not job.description). */
