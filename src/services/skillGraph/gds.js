@@ -2,7 +2,7 @@
  * Neo4j Graph Data Science integration — weighted path scoring + projection lifecycle.
  * Falls back to weighted Cypher path scoring when GDS plugin is unavailable.
  */
-import { isNeo4jReady, runRead } from '../../db/neo4j.js';
+import { isNeo4jReady, runRead, toNeo4jInt } from '../../db/neo4j.js';
 import {
 	getGdsGraphName,
 	getGdsRefreshDebounceMs,
@@ -63,7 +63,8 @@ function buildRelationshipProjectionCypher() {
 	const relList = GDS_REL_TYPES.join('|');
 	const m = getRelationMultipliers();
 	const defaultW = getKgConfidenceDefaultEdgeWeight();
-	return `
+	const costExpr = `(1.0 - coalesce(r.weight, ${defaultW})) / mult`;
+	const forward = `
 		MATCH (a:Skill)-[r:${relList}]->(b:Skill)
 		WITH a, b, r,
 			CASE type(r)
@@ -76,9 +77,24 @@ function buildRelationshipProjectionCypher() {
 				WHEN 'SPECIALIZATION_OF' THEN ${m.SPECIALIZATION_OF}
 				ELSE ${defaultW}
 			END AS mult
-		RETURN id(a) AS source, id(b) AS target,
-			(1.0 - coalesce(r.weight, ${defaultW})) / mult AS ${COST_PROPERTY}
+		RETURN id(a) AS source, id(b) AS target, ${costExpr} AS ${COST_PROPERTY}
 	`;
+	const reverse = `
+		MATCH (a:Skill)-[r:${relList}]->(b:Skill)
+		WITH a, b, r,
+			CASE type(r)
+				WHEN 'PREREQUISITE_OF' THEN ${m.PREREQUISITE_OF}
+				WHEN 'BUILDS_ON' THEN ${m.BUILDS_ON}
+				WHEN 'USED_WITH' THEN ${m.USED_WITH}
+				WHEN 'RELATED_TO' THEN ${m.RELATED_TO}
+				WHEN 'PART_OF' THEN ${m.PART_OF}
+				WHEN 'ALTERNATIVE_TO' THEN ${m.ALTERNATIVE_TO}
+				WHEN 'SPECIALIZATION_OF' THEN ${m.SPECIALIZATION_OF}
+				ELSE ${defaultW}
+			END AS mult
+		RETURN id(b) AS source, id(a) AS target, ${costExpr} AS ${COST_PROPERTY}
+	`;
+	return `${forward} UNION ALL ${reverse}`;
 }
 
 /** Drop and recreate the in-memory GDS projection. */
@@ -140,37 +156,59 @@ async function gdsBestPath(jobSkillId, userSkillIds) {
 	if (!projectionReady) return null;
 
 	const graphName = getGdsGraphName();
-	const sourceRecords = await runRead(
-		'MATCH (s:Skill { id: $id }) RETURN id(s) AS internalId',
-		{ id: jobSkillId },
-	);
-	const sourceInternalId = num(sourceRecords[0]?.get('internalId'));
-	if (!sourceInternalId) return null;
-
-	const targetSet = new Set(userSkillIds.map(String));
-	const records = await runRead(
+	const nodeRecords = await runRead(
 		`
-		CALL gds.shortestPath.dijkstra.stream($graphName, {
-			sourceNode: $sourceNode,
-			relationshipWeightProperty: $costProperty
-		})
-		YIELD targetNode, totalCost, nodeIds
-		RETURN gds.util.asNode(targetNode).id AS targetSkillId,
-		       totalCost,
-		       [nid IN nodeIds | gds.util.asNode(nid).id] AS pathSkills
+		MATCH (s:Skill)
+		WHERE s.id = $jobId OR s.id IN $userIds
+		RETURN s.id AS skillId, id(s) AS internalId
 		`,
-		{
-			graphName,
-			sourceNode: sourceInternalId,
-			costProperty: COST_PROPERTY,
-		},
+		{ jobId: jobSkillId, userIds: userSkillIds },
 	);
+
+	let sourceInternalId = null;
+	const targetInternalIds = [];
+	for (const r of nodeRecords) {
+		const skillId = r.get('skillId');
+		const internalId = num(r.get('internalId'));
+		if (!internalId) continue;
+		if (skillId === jobSkillId) {
+			sourceInternalId = toNeo4jInt(internalId);
+		} else {
+			targetInternalIds.push(toNeo4jInt(internalId));
+		}
+	}
+
+	if (!sourceInternalId || !targetInternalIds.length) return null;
+
+	let records;
+	try {
+		records = await runRead(
+			`
+			CALL gds.shortestPath.dijkstra.stream($graphName, {
+				sourceNode: $sourceNode,
+				targetNodes: $targetNodes,
+				relationshipWeightProperty: $costProperty
+			})
+			YIELD targetNode, totalCost, nodeIds
+			RETURN gds.util.asNode(targetNode).id AS targetSkillId,
+			       totalCost,
+			       [nid IN nodeIds | gds.util.asNode(nid).id] AS pathSkills
+			`,
+			{
+				graphName,
+				sourceNode: sourceInternalId,
+				targetNodes: targetInternalIds,
+				costProperty: COST_PROPERTY,
+			},
+		);
+	} catch (err) {
+		console.warn('[gds] dijkstra failed:', err.message);
+		return null;
+	}
 
 	let best = null;
 	for (const r of records) {
 		const targetSkillId = r.get('targetSkillId');
-		if (!targetSet.has(String(targetSkillId))) continue;
-
 		const totalCost = num(r.get('totalCost'));
 		const pathSkills = (r.get('pathSkills') || []).map(String);
 		const hops = Math.max(0, pathSkills.length - 1);
@@ -261,8 +299,12 @@ export async function computeBestPathMatch(jobSkillId, userSkillIds) {
 	}
 
 	if (await isGdsReady()) {
-		const gdsResult = await gdsBestPath(jobSkillId, userIds);
-		if (gdsResult) return gdsResult;
+		try {
+			const gdsResult = await gdsBestPath(jobSkillId, userIds);
+			if (gdsResult) return gdsResult;
+		} catch (err) {
+			console.warn('[gds] path match failed, using cypher fallback:', err.message);
+		}
 	}
 
 	if (getKgGdsFallbackToCypher()) {
