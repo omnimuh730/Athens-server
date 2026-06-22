@@ -157,7 +157,7 @@ async function runJobAnalysis(job) {
 			costUsd: llmUsage.cost,
 			costFormatted: formatCostUsd(llmUsage.cost),
 			summary: formatUsageSummary(llmUsage),
-			pricingNote: 'deepseek-v4-flash: $0.09/1M input · $0.18/1M output',
+			pricingNote: 'deepseek-v4-flash: $0.14/1M cache miss · $0.0028/1M cache hit · $0.28/1M output',
 		});
 	}
 

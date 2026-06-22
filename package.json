@@ -6,6 +6,7 @@
 	"license": "MIT",
 	"scripts": {
 		"start": "nodemon index.js",
+		"test:llm": "node --test src/services/llm/llmService.test.mjs",
 		"migrate": "node src/db/migration.js",
 		"migrate-passwords": "node src/db/migratePasswords.js",
 		"backfill-job-embeddings": "node src/scripts/backfillJobEmbeddings.js",

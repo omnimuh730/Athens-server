@@ -6,6 +6,8 @@
 //   - openai   → https://api.openai.com/v1   (gpt-* models)
 //   - deepseek → https://api.deepseek.com/v1 (deepseek-v4-* models)
 
+import { costFromUsage, findPricing } from "../../../../codex/core-backend/src/pricing.mjs";
+
 export const PROVIDERS = {
   openai: {
     id: "openai",
@@ -30,88 +32,40 @@ export function getProvider(id) {
 }
 
 // ---------------------------------------------------------------------------
-// Pricing + token/cost calculator (the dedicated, reusable cost module)
+// Pricing + token/cost calculator — delegates to codex/core-backend/pricing.mjs
+// (source of truth for OpenAI + DeepSeek V4 cache hit/miss rates).
 // ---------------------------------------------------------------------------
 
-// USD per 1,000,000 tokens. `cached` is the discounted rate for prompt-cache
-// hits. Models are matched exactly first, then by longest known prefix, so
-// dated snapshots (e.g. gpt-5-nano-2025-08-07) inherit the base model's price.
-// Standard-tier list prices from openai_price.md (per 1M tokens). `cached` is
-// the discounted cached-input rate; models with no cache discount use the input
-// rate. Explicit per-model entries (incl. gpt-5.x point releases like 5.4-nano)
-// so the longest-prefix fallback never misprices a variant.
-export const PRICING_PER_MILLION = {
-  // OpenAI — gpt-5.x point releases
-  "gpt-5.5-pro": { input: 30, cached: 30, output: 180 },
-  "gpt-5.5": { input: 5, cached: 0.5, output: 30 },
-  "gpt-5.4-pro": { input: 30, cached: 30, output: 180 },
-  "gpt-5.4-nano": { input: 0.2, cached: 0.02, output: 1.25 },
-  "gpt-5.4-mini": { input: 0.75, cached: 0.075, output: 4.5 },
-  "gpt-5.4": { input: 2.5, cached: 0.25, output: 15 },
-  "gpt-5.2-pro": { input: 21, cached: 21, output: 168 },
-  "gpt-5.2": { input: 1.75, cached: 0.175, output: 14 },
-  "gpt-5.1": { input: 1.25, cached: 0.125, output: 10 },
-  // OpenAI — gpt-5 base family
-  "gpt-5-pro": { input: 15, cached: 15, output: 120 },
-  "gpt-5-nano": { input: 0.05, cached: 0.005, output: 0.4 },
-  "gpt-5-mini": { input: 0.25, cached: 0.025, output: 2.0 },
-  "gpt-5": { input: 1.25, cached: 0.125, output: 10.0 },
-  // OpenAI — 4.1 / 4o
-  "gpt-4.1-nano": { input: 0.1, cached: 0.025, output: 0.4 },
-  "gpt-4.1-mini": { input: 0.4, cached: 0.1, output: 1.6 },
-  "gpt-4.1": { input: 2.0, cached: 0.5, output: 8.0 },
-  "gpt-4o-mini": { input: 0.15, cached: 0.075, output: 0.6 },
-  "gpt-4o": { input: 2.5, cached: 1.25, output: 10.0 },
-  // OpenAI — o-series
-  "o1-mini": { input: 1.1, cached: 0.55, output: 4.4 },
-  "o1-pro": { input: 150, cached: 150, output: 600 },
-  "o1": { input: 15, cached: 7.5, output: 60 },
-  "o3-mini": { input: 1.1, cached: 0.55, output: 4.4 },
-  "o3-pro": { input: 20, cached: 20, output: 80 },
-  "o3": { input: 2, cached: 0.5, output: 8 },
-  "o4-mini": { input: 1.1, cached: 0.275, output: 4.4 },
-  // DeepSeek — deepseek-v4-flash list prices (USD per 1M tokens).
-  "deepseek-v4-flash": { input: 0.09, cached: 0.09, output: 0.18 },
-  "deepseek-v4-pro": { input: 0.55, cached: 0.14, output: 2.19 },
-};
-
+/** @deprecated Use findPricing from core-backend; kept for callers expecting { input, cached, output }. */
 export function getPricing(model) {
-  const key = String(model || "");
-  if (PRICING_PER_MILLION[key]) return PRICING_PER_MILLION[key];
-  // Longest-prefix match handles dated snapshots (gpt-5.4-nano-2026-… →
-  // gpt-5.4-nano) without mispricing — explicit entries above always win.
-  const match = Object.keys(PRICING_PER_MILLION)
-    .sort((a, b) => b.length - a.length)
-    .find((candidate) => key.startsWith(candidate));
-  return match ? PRICING_PER_MILLION[match] : null;
+  const row = findPricing(model);
+  if (!row) return null;
+  return { input: row.input, cached: row.cachedInput ?? row.input, output: row.output };
 }
 
 /**
  * Turn a raw OpenAI-style `usage` object into a normalized token + cost summary.
- * Separated out so the same math powers every call and the frontend display.
+ * inputTokens = cache-miss input; cachedTokens = cache-hit input (DeepSeek naming).
  */
 export function summarizeUsage(usage, model) {
-  const inputTokens = Number(usage?.prompt_tokens ?? 0) || 0;
-  // OpenAI reports cache hits under prompt_tokens_details.cached_tokens; DeepSeek
-  // reports them as prompt_cache_hit_tokens — accept either so caching is priced.
-  const cachedTokens = Number(usage?.prompt_tokens_details?.cached_tokens ?? usage?.prompt_cache_hit_tokens ?? 0) || 0;
-  const outputTokens = Number(usage?.completion_tokens ?? 0) || 0;
-  const totalTokens = Number(usage?.total_tokens ?? inputTokens + outputTokens) || 0;
-  const uncachedInput = Math.max(0, inputTokens - cachedTokens);
-
-  const pricing = getPricing(model);
-  const cost = pricing
-    ? (uncachedInput / 1_000_000) * pricing.input +
-      (cachedTokens / 1_000_000) * pricing.cached +
-      (outputTokens / 1_000_000) * pricing.output
-    : null;
-  // What the call would have cost with no prompt caching — the gap is the saving.
+  const u = costFromUsage(model, usage);
+  const pricing = findPricing(model);
+  const totalInput = u.inputTokens + u.cachedTokens;
   const costNoCache = pricing
-    ? (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output
+    ? (totalInput / 1_000_000) * pricing.input + (u.outputTokens / 1_000_000) * pricing.output
     : null;
-  const savings = cost != null && costNoCache != null ? Math.max(0, costNoCache - cost) : null;
+  const savings = costNoCache != null ? Math.max(0, costNoCache - u.costUsd) : null;
 
-  return { model, inputTokens, cachedTokens, outputTokens, totalTokens, cost, savings, priced: Boolean(pricing) };
+  return {
+    model,
+    inputTokens: u.inputTokens,
+    cachedTokens: u.cachedTokens,
+    outputTokens: u.outputTokens,
+    totalTokens: u.totalTokens,
+    cost: u.costUsd,
+    savings,
+    priced: u.priced,
+  };
 }
 
 const EMPTY_USAGE = () => ({
