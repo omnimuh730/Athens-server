@@ -12,6 +12,7 @@ router.get("/stream/:runId", proxyToAgentBff);
 router.get("/activity", proxyToAgentBff);
 router.get("/job-sources", proxyToAgentBff);
 router.get("/jobs", proxyToAgentBff);
+router.get("/jobs/posted", proxyToAgentBff);
 router.get("/models", proxyToAgentBff);
 router.post("/deploy", proxyToAgentBff);
 router.post("/runs/:runId/resume", proxyToAgentBff);

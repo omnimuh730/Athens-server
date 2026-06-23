@@ -37,6 +37,7 @@ import {
 	analyzeUserResumeHandler,
 } from "../controllers/userResumeController.js";
 import { analyzeResumeMatch } from "../controllers/resumeAnalysisController.js";
+import { listChromeProfiles, importChromeSession, chromeProfileAvatar } from "../controllers/chromeProfilesController.js";
 
 const router = express.Router();
 
@@ -75,5 +76,8 @@ router.put('/personal/user-resumes/:id/primary', setPrimaryUserResumeHandler);
 router.post('/personal/user-resumes/:id/analyze', analyzeUserResumeHandler);
 router.delete('/personal/user-resumes/:id', deleteUserResumeHandler);
 router.post('/personal/resume-analysis', analyzeResumeMatch);
+router.get('/personal/chrome-profiles', listChromeProfiles);
+router.post('/personal/chrome-profiles/import', importChromeSession);
+router.get('/personal/chrome-profiles/avatar', chromeProfileAvatar);
 
 export default router;

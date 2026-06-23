@@ -40,10 +40,27 @@ export function buildProfileEmbeddingText(ownerName, skillProfile = []) {
 	return parts.join('\n\n').trim();
 }
 
+const MAX_JOB_DESCRIPTION = 4000;
+
 export function buildJobEmbeddingText(jobDoc) {
 	const skills = Array.isArray(jobDoc?.skills)
 		? jobDoc.skills.map((s) => String(s).trim()).filter(Boolean)
 		: [];
-	if (!skills.length) return '';
-	return `Required skills: ${skills.join(', ')}`;
+	const tags = Array.isArray(jobDoc?.tags)
+		? jobDoc.tags.map((t) => String(t).trim()).filter(Boolean)
+		: [];
+	const title = String(jobDoc?.title ?? '').trim();
+	const company = String(jobDoc?.company?.name ?? jobDoc?.company ?? '').trim();
+	const description = String(jobDoc?.description ?? '').trim();
+	const truncatedDescription = description.length > MAX_JOB_DESCRIPTION
+		? `${description.slice(0, MAX_JOB_DESCRIPTION)}\n[truncated]`
+		: description;
+
+	const parts = [];
+	if (title) parts.push(`Title: ${title}`);
+	if (company) parts.push(`Company: ${company}`);
+	if (skills.length) parts.push(`Required skills: ${skills.join(', ')}`);
+	if (tags.length) parts.push(`Tags: ${tags.join(', ')}`);
+	if (truncatedDescription) parts.push(`Description: ${truncatedDescription}`);
+	return parts.join('\n\n').trim();
 }
