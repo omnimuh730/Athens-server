@@ -8,7 +8,7 @@ import {
   rebuildProfileGraph,
 } from "./userKnowledgeGraph/index.js";
 import { syncEmbeddingsAfterResumeAnalysis } from "./embeddings/embeddingIngest.js";
-import { invalidateRecommendationCache } from "./recommendation/recommendationService.js";
+import { invalidateRecommendationCache } from "./matching/matchingService.js";
 
 function cleanString(v) {
   return String(v ?? "").trim();

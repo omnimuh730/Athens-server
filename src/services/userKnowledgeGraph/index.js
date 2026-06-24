@@ -1,13 +1,9 @@
-import { resolveSkillToCanonical, resolvePersonalSkill } from '../skillGraph/resolve.js';
-import { findExactMatches } from '../skillGraph/search.js';
-import { getProfileGraphCoocEdgeWeight } from '../../config/graphAndVectorConfig.js';
-import { normalizeSkillKey, normalizeSurfaceForm } from '../skillGraph/normalize.js';
+import { toCanonical } from '../../../../packages/shared/src/skill-normalize.js';
 import {
 	userKnowledgeGraphsCollection,
 	personalInfoCollection,
 	userResumesCollection,
 } from '../../db/mongo.js';
-import { enqueueSkills } from '../skillEnrichment/queue.js';
 
 export const PROFILE_GRAPH_ID = '__profile__';
 
@@ -29,27 +25,16 @@ function normalizeSkillInputs(skills = []) {
 			continue;
 		}
 		if (!name) continue;
-		const key = name.toLowerCase();
-		if (seen.has(key)) continue;
+		const key = toCanonical(name);
+		if (!key || seen.has(key)) continue;
 		seen.add(key);
 		out.push({ name, strength });
 	}
 	return out.slice(0, 200);
 }
 
-async function buildPersonalSkillDoc(name) {
-	const resolved = await resolvePersonalSkill(name);
-	return {
-		name: resolved.raw || name.trim(),
-		normalizedKey: resolved.normalizedKey || normalizeSkillKey(name),
-		canonicalId: resolved.canonicalId || null,
-		createdAt: new Date().toISOString(),
-	};
-}
-
 /**
- * Build or update a per-resume user knowledge graph.
- * Skills reference world graph canonicalIds; missing skills are enqueued (not LLM-enriched).
+ * Build or update a per-resume user knowledge graph (Mongo only).
  */
 export async function buildUserGraphFromResume({
 	applierName,
@@ -64,54 +49,18 @@ export async function buildUserGraphFromResume({
 	if (!name) throw new Error('applierName is required');
 
 	const normalizedInputs = normalizeSkillInputs(skills);
-	const cooc = normalizedInputs.map((s) => s.name);
-
-	await enqueueSkills(cooc, cooc);
-
-	const normalizedInputsWithKeys = normalizedInputs
-		.map(({ name: raw, strength }) => {
-			const surfaceForm = normalizeSurfaceForm(raw);
-			const normalizedKey = normalizeSkillKey(surfaceForm);
-			return normalizedKey ? { raw, strength, surfaceForm, normalizedKey } : null;
-		})
-		.filter(Boolean);
-
-	const matchMap = await findExactMatches(normalizedInputsWithKeys.map((item) => item.normalizedKey));
-
-	const missingForEnqueue = [];
-	const resolvedSkills = [];
-	for (const { raw, strength, surfaceForm, normalizedKey } of normalizedInputsWithKeys) {
-		const exact = matchMap.get(normalizedKey);
-		if (!exact?.id) {
-			missingForEnqueue.push(surfaceForm);
-		}
-
-		const proficiency = strength / 10;
-		resolvedSkills.push({
-			surfaceForm: surfaceForm || raw,
-			normalizedKey,
-			canonicalId: exact?.id || null,
+	const resolvedSkills = normalizedInputs.map(({ name: raw, strength }) => {
+		const canonical = toCanonical(raw);
+		return {
+			surfaceForm: raw,
+			name: raw,
+			normalizedKey: canonical,
+			canonicalId: canonical,
 			strength,
-			proficiency,
+			proficiency: strength / 10,
 			sources: ['resume'],
-		});
-	}
-
-	if (missingForEnqueue.length) {
-		await enqueueSkills(missingForEnqueue, cooc);
-	}
-
-	const edges = [];
-	const edgeCap = Math.min(resolvedSkills.length, 40);
-	for (let i = 0; i < edgeCap; i++) {
-		for (let j = i + 1; j < edgeCap; j++) {
-			const a = resolvedSkills[i].canonicalId;
-			const b = resolvedSkills[j].canonicalId;
-			if (a && b && a !== b) {
-				edges.push({ fromId: a, toId: b, type: 'USED_WITH', weight: getProfileGraphCoocEdgeWeight() });
-			}
-		}
-	}
+		};
+	});
 
 	const now = new Date().toISOString();
 	const doc = {
@@ -119,7 +68,7 @@ export async function buildUserGraphFromResume({
 		resumeId: rId,
 		resumeName: resumeName?.trim() || rId,
 		skills: resolvedSkills,
-		edges,
+		edges: [],
 		updatedAt: now,
 	};
 
@@ -132,23 +81,19 @@ export async function buildUserGraphFromResume({
 	return doc;
 }
 
-/** List user graphs for an applier. */
 export async function listUserGraphs(applierName) {
 	if (!userKnowledgeGraphsCollection) return [];
 	const name = String(applierName || '').trim();
 	if (!name) return [];
-
 	return userKnowledgeGraphsCollection
 		.find({ applierName: name })
 		.sort({ updatedAt: -1 })
 		.toArray();
 }
 
-/** Build a default user graph from personal_info skills (interim bridge). */
 export async function ensureDefaultUserGraphFromPersonal(applierName, personalSkills = []) {
 	const skills = personalSkills.filter(Boolean);
 	if (!skills.length) return null;
-
 	return buildUserGraphFromResume({
 		applierName,
 		resumeId: 'personal-default',
@@ -157,17 +102,21 @@ export async function ensureDefaultUserGraphFromPersonal(applierName, personalSk
 	});
 }
 
-/** Upsert skill names into personal_info profile knowledge. */
 export async function mergeSkillsIntoPersonalInfo(skillNames = []) {
 	if (!personalInfoCollection) return;
 	const names = [...new Set(skillNames.map((s) => String(s).trim()).filter(Boolean))];
-	for (const name of names) {
-		const doc = await buildPersonalSkillDoc(name);
-		await personalInfoCollection.updateOne({ name: doc.name }, { $set: doc }, { upsert: true });
+	for (const raw of names) {
+		const canonical = toCanonical(raw);
+		const doc = {
+			name: raw,
+			normalizedKey: canonical,
+			canonicalId: canonical,
+			createdAt: new Date().toISOString(),
+		};
+		await personalInfoCollection.updateOne({ name: raw }, { $set: doc }, { upsert: true });
 	}
 }
 
-/** Rebuild aggregate profile graph from all analyzed resumes (max strength per skill). */
 export async function rebuildProfileGraph(applierName) {
 	const name = String(applierName || '').trim();
 	if (!name || !userResumesCollection || !userKnowledgeGraphsCollection) return null;
@@ -177,7 +126,6 @@ export async function rebuildProfileGraph(applierName) {
 		.toArray();
 
 	const strengthByKey = new Map();
-
 	for (const resume of analyzedResumes) {
 		for (const entry of resume.skillProfile || []) {
 			const skillName = String(entry.name || '').trim();
@@ -185,8 +133,7 @@ export async function rebuildProfileGraph(applierName) {
 			if (!Number.isFinite(strength)) strength = 5;
 			strength = Math.max(0, Math.min(10, strength));
 			if (!skillName || strength <= 0) continue;
-
-			const key = normalizeSkillKey(normalizeSurfaceForm(skillName));
+			const key = toCanonical(skillName);
 			if (!key) continue;
 			const prev = strengthByKey.get(key);
 			if (!prev || strength > prev.strength) {
@@ -212,12 +159,12 @@ export async function rebuildProfileGraph(applierName) {
 	});
 }
 
-/** Seed canonicalIds for activation — from selected resume graphs. */
 export function extractSeedCanonicalIds(graphs = []) {
 	const ids = new Set();
 	for (const g of graphs) {
 		for (const s of g.skills || []) {
-			if (s.canonicalId) ids.add(s.canonicalId);
+			const id = s.canonicalId || s.normalizedKey;
+			if (id) ids.add(id);
 		}
 	}
 	return [...ids];

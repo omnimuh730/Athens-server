@@ -1,16 +1,10 @@
 services:
-  neo4j:
-    image: neo4j:5-community
+  redis:
+    image: redis:7-alpine
     ports:
-      - "7474:7474"
-      - "7687:7687"
-    environment:
-      NEO4J_AUTH: neo4j/skillgraph-dev
-      NEO4J_PLUGINS: '["graph-data-science"]'
-      NEO4J_dbms_security_procedures_unrestricted: gds.*
-      NEO4J_dbms_security_procedures_allowlist: gds.*
+      - "6379:6379"
     volumes:
-      - neo4j_data:/data
+      - redis_data:/data
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -26,10 +20,8 @@ services:
       - "11434:11434"
     volumes:
       - ollama_storage:/root/.ollama
-    # After first start, pull the embedding model:
-    #   docker compose exec ollama ollama pull mxbai-embed-large
 
 volumes:
-  neo4j_data:
+  redis_data:
   qdrant_storage:
   ollama_storage:

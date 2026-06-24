@@ -1,4 +1,4 @@
-import { normalizeSkillKey, normalizeSurfaceForm } from "./skillGraph/normalize.js";
+import { toCanonical } from "../services/skillNormalize.js";
 
 const SKILL_ALIASES = [
 	["go", "golang"],
@@ -9,7 +9,7 @@ const SKILL_ALIASES = [
 ];
 
 function skillKey(name) {
-	return normalizeSkillKey(normalizeSurfaceForm(name)) || name.toLowerCase();
+	return toCanonical(String(name ?? "").trim()) || String(name).toLowerCase();
 }
 
 /** Parse explicit Skills section bullets and comma lists from resume text. */

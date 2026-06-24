@@ -15,9 +15,8 @@ import {
 	JOB_DETAIL_PROJECTION,
 } from '../services/jobListQuery.js';
 import { queueJobAnalysis, getJobAnalysisStatus } from '../services/jobAnalysis/index.js';
-import { enqueueSkills } from '../services/skillEnrichment/queue.js';
-import { recordCooccurrenceForJob } from '../services/skillCooccurrence/index.js';
-import { recommendJobsForApplier } from '../services/recommendation/recommendationService.js';
+import { matchJobsForApplier } from '../services/matching/matchingService.js';
+import { normalizeJobSkills, indexJobInRedis } from '../services/matching/skillIndex.js';
 import { upsertJobEmbeddingAsync } from '../services/embeddings/embeddingIngest.js';
 import {
 	getJobEmbeddingStatus,
@@ -111,6 +110,7 @@ export async function createJob(req, res) {
 		job.companyLink = typeof job.companyLink === 'string' ? job.companyLink.trim() : '';
 
 		const skills = Array.isArray(job.skills) ? job.skills.map(s => String(s).trim()).filter(Boolean) : [];
+		job.skillsNormalized = normalizeJobSkills(skills);
 		try {
 			const companyTags = Array.isArray(job.company?.tags) ? job.company.tags.map(t => String(t).trim()).filter(Boolean) : [];
 			if (companyCategoryCollection && companyTags.length) {
@@ -135,16 +135,7 @@ export async function createJob(req, res) {
 
 		if (result?.insertedId) {
 			upsertJobEmbeddingAsync(String(result.insertedId));
-		}
-
-		// Enqueue unseen skills for KG analyze + record co-occurrence (free, no LLM).
-		if (skills.length) {
-			try {
-				await enqueueSkills(skills, skills);
-				await recordCooccurrenceForJob(skills, { jobId: result?.insertedId ? String(result.insertedId) : undefined });
-			} catch (e) {
-				console.warn('Failed to enqueue job skills for graph enrichment', e);
-			}
+			void indexJobInRedis(String(result.insertedId), job.skillsNormalized).catch(() => {});
 		}
 
 		return res.status(201).json({
@@ -299,7 +290,7 @@ export async function getJobs(req, res) {
 		const useRecommendation = sort === 'recommended' && applierName;
 
 		if (useRecommendation) {
-			const result = await recommendJobsForApplier({
+			const result = await matchJobsForApplier({
 				applierName,
 				mongoQuery: query,
 				scoreFilters,

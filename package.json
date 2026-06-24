@@ -6,21 +6,21 @@
 	"license": "MIT",
 	"scripts": {
 		"start": "nodemon index.js",
-		"test:llm": "node --test src/services/llm/llmService.test.mjs",
+		"test:matching": "node --test ../packages/shared/src/pricing.test.mjs",
 		"migrate": "node src/db/migration.js",
 		"migrate-passwords": "node src/db/migratePasswords.js",
 		"backfill-job-embeddings": "node src/scripts/backfillJobEmbeddings.js",
 		"backfill-resume-embeddings": "node src/scripts/backfillResumeEmbeddings.js",
+		"backfill-job-skills": "node src/scripts/backfillJobSkills.js",
 		"ollama-pull-embed": "ollama pull mxbai-embed-large",
 		"qdrant:start": "bash scripts/start-qdrant.sh",
 		"qdrant:stop": "bash scripts/stop-qdrant.sh",
 		"qdrant:start-native": "bash scripts/start-qdrant-local.sh",
-		"qdrant:stop-native": "bash scripts/stop-qdrant-local.sh",
-		"reset-skill-graph": "node src/scripts/resetSkillGraph.js",
-		"backfill-graph-bridges": "node src/scripts/backfillGraphBridges.js"
+		"qdrant:stop-native": "bash scripts/stop-qdrant-local.sh"
 	},
 	"dependencies": {
-		"@google/genai": "^1.13.0",
+		"@nextoffer/shared": "file:../packages/shared",
+		"@nextoffer/shared": "file:../packages/shared",
 		"bcrypt": "^5.1.1",
 		"cheerio": "^1.2.0",
 		"cors": "^2.8.5",
@@ -33,10 +33,10 @@
 		"mailparser": "^3.9.11",
 		"mammoth": "^1.12.0",
 		"mongodb": "^6.19.0",
-		"neo4j-driver": "^6.1.0",
 		"nodemailer": "^9.0.1",
 		"pdf-parse": "^1.1.4",
 		"puppeteer": "^25.1.0",
+		"redis": "^4.7.0",
 		"socket.io": "^4.8.1"
 	},
 	"devDependencies": {

@@ -1,4 +1,4 @@
-const BFF_BASE = (process.env.AGENT_BFF_URL || "http://127.0.0.1:8780").replace(/\/$/, "");
+const BFF_BASE = (process.env.CONNECTOR_URL || process.env.AGENT_BFF_URL || 'http://127.0.0.1:8781').replace(/\/$/, '');
 
 /** Map Athens /api/agents/* paths to agent-bff /api/* paths. */
 function mapBffPath(reqPath) {
@@ -48,7 +48,7 @@ export async function proxyToAgentBff(req, res) {
   } catch (err) {
     return res.status(502).json({
       success: false,
-      error: `Agent BFF unreachable at ${BFF_BASE}. Start codex/agent-bff (npm run dev).`,
+      error: `Connector unreachable at ${BFF_BASE}. Start connector (npm start).`,
       detail: err?.message || String(err),
     });
   }

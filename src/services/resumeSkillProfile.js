@@ -1,4 +1,4 @@
-import { normalizeSkillKey, normalizeSurfaceForm } from "./skillGraph/normalize.js";
+import { toCanonical } from "./skillNormalize.js";
 
 const SKILL_ALIASES = [
 	["go", "golang"],
@@ -12,7 +12,7 @@ const GENERIC_STACK_RE =
 	/^(languages?|frameworks?(?:\s*&\s*libraries?)?|cloud|devops|databases?|tools?|skills?|backend|frontend|other)$/i;
 
 function skillKey(name) {
-	return normalizeSkillKey(normalizeSurfaceForm(name)) || name.toLowerCase();
+	return toCanonical(String(name ?? "").trim()) || String(name).toLowerCase();
 }
 
 function cleanString(v) {

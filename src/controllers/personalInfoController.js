@@ -1,17 +1,16 @@
 
 import { personalInfoCollection, accountInfoCollection, getCloudMirrorStatus } from "../db/mongo.js";
 import { updateAccountInfoById } from "../services/accountInfoStore.js";
-import { resolvePersonalSkill } from "../services/skillGraph/resolve.js";
-import { normalizeSkillKey } from "../services/skillGraph/normalize.js";
+import { toCanonical } from "../services/skillNormalize.js";
 import { emptyResumeCatalog, validateResumeCatalog } from "../services/resumeCatalogService.js";
 
-/** Build personal skill document with graph canonicalId. */
+/** Build personal skill document with normalized canonical id. */
 async function buildPersonalSkillDoc(name) {
-	const resolved = await resolvePersonalSkill(name);
+	const canonical = toCanonical(name);
 	return {
-		name: resolved.raw || name.trim(),
-		normalizedKey: resolved.normalizedKey || normalizeSkillKey(name),
-		canonicalId: resolved.canonicalId || null,
+		name: name.trim(),
+		normalizedKey: canonical,
+		canonicalId: canonical,
 		createdAt: new Date().toISOString(),
 	};
 }

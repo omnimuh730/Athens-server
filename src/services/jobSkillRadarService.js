@@ -4,119 +4,44 @@ import {
 	userKnowledgeGraphsCollection,
 	userResumesCollection,
 } from '../db/mongo.js';
-import { isNeo4jReady } from '../db/neo4j.js';
-import { normalizeSkillKey, toComparable } from '../services/skillGraph/normalize.js';
-import { resolveMany } from '../services/skillGraph/resolve.js';
-import { computeBestPathMatch } from '../services/skillGraph/gds.js';
 import { PROFILE_GRAPH_ID } from '../services/userKnowledgeGraph/index.js';
-import { rankResumesForJob } from '../services/recommendation/vectorRetrieval.js';
-import { loadResumeVectorEntries, cosineSimilarity } from '../services/recommendation/vectorRetrieval.js';
-import { getJobVector } from '../services/vectorStore/qdrantClient.js';
-import { upsertJobEmbedding } from '../services/embeddings/embeddingIngest.js';
-import { computeGraphBoost } from '../services/recommendation/graphRankBoost.js';
-import { getMatchScoreWeights } from '../config/graphAndVectorConfig.js';
+import { loadProfileSkillSet } from './matching/profileSkills.js';
+import { computeCoverageScore } from './matching/coverageScore.js';
+import { normalizeJobSkills, toCanonical } from './matching/skillIndex.js';
 import { queueJobAnalysis } from '../services/jobAnalysis/index.js';
 
 const MAX_RADAR_AXES = 12;
 const REQUIRED_SCORE = 100;
-
-function clampScore(value) {
-	const n = Number(value);
-	if (!Number.isFinite(n)) return 0;
-	return Math.max(0, Math.min(100, Math.round(n)));
-}
 
 function userSkillStrength(skill) {
 	let raw = Number(skill.strength);
 	if (!Number.isFinite(raw)) {
 		raw = (Number(skill.proficiency) || 0.5) * 10;
 	}
-	return clampScore(raw * 10);
+	return Math.max(0, Math.min(100, Math.round(raw * 10)));
 }
 
-function findDirectUserMatch(jobNormalizedKey, jobCanonicalId, userSkills = []) {
-	for (const skill of userSkills) {
-		const userKey = skill.normalizedKey || toComparable(skill.surfaceForm || skill.name || '');
-		if (jobNormalizedKey && userKey === jobNormalizedKey) {
-			return {
-				userScore: userSkillStrength(skill),
-				matchType: 'direct',
-				matchedVia: skill.surfaceForm || skill.name || userKey,
-			};
-		}
-		if (jobCanonicalId && skill.canonicalId === jobCanonicalId) {
-			return {
-				userScore: userSkillStrength(skill),
-				matchType: 'direct',
-				matchedVia: skill.surfaceForm || skill.name || jobCanonicalId,
-			};
-		}
+function buildAxesFromCoverage(jobSkills, profileSkills, userGraphSkills = []) {
+	const strengthByCanonical = new Map();
+	for (const s of userGraphSkills) {
+		const key = toCanonical(s.surfaceForm || s.name || '');
+		if (!key) continue;
+		strengthByCanonical.set(key, Math.max(strengthByCanonical.get(key) ?? 0, userSkillStrength(s)));
 	}
-	return null;
-}
 
-async function findGraphUserMatch(jobCanonicalId, userSkills = []) {
-	if (!jobCanonicalId || !isNeo4jReady()) return null;
-
-	const userWithCanonical = userSkills.filter((s) => s.canonicalId);
-	if (!userWithCanonical.length) return null;
-
-	const userIds = userWithCanonical.map((s) => s.canonicalId);
-	const pathMatch = await computeBestPathMatch(jobCanonicalId, userIds);
-	if (!pathMatch?.userSkillId) return null;
-
-	const userSkill = userWithCanonical.find((s) => s.canonicalId === pathMatch.userSkillId);
-	if (!userSkill) return null;
-
-	const userScore = clampScore(userSkillStrength(userSkill) * pathMatch.similarity);
-	return {
-		userScore,
-		matchType: 'graph',
-		matchedVia: userSkill.surfaceForm || userSkill.name || pathMatch.userSkillId,
-		weight: pathMatch.similarity,
-		pathCost: pathMatch.pathCost,
-		pathHops: pathMatch.hops,
-		pathSkills: pathMatch.pathSkills,
-		pathRelTypes: pathMatch.pathRelTypes,
-	};
-}
-
-async function scoreJobSkillAxis(jobSkillLabel, resolved, userSkills) {
-	const normalizedKey = resolved?.normalizedKey || normalizeSkillKey(jobSkillLabel);
-	const canonicalId = resolved?.canonicalId || null;
-
-	const direct = findDirectUserMatch(normalizedKey, canonicalId, userSkills);
-	if (direct) {
-		return {
-			skill: jobSkillLabel,
+	const axes = [];
+	for (const label of jobSkills.slice(0, MAX_RADAR_AXES)) {
+		const canonical = toCanonical(label);
+		const hasSkill = profileSkills.has(canonical);
+		axes.push({
+			skill: label,
 			required: REQUIRED_SCORE,
-			user: direct.userScore,
-			matchType: direct.matchType,
-			matchedVia: direct.matchedVia,
-		};
+			user: hasSkill ? (strengthByCanonical.get(canonical) ?? 80) : 0,
+			matchType: hasSkill ? 'direct' : 'none',
+			matchedVia: hasSkill ? label : undefined,
+		});
 	}
-
-	const graph = await findGraphUserMatch(canonicalId, userSkills);
-	if (graph) {
-		return {
-			skill: jobSkillLabel,
-			required: REQUIRED_SCORE,
-			user: graph.userScore,
-			matchType: graph.matchType,
-			matchedVia: graph.matchedVia,
-			pathCost: graph.pathCost,
-			pathHops: graph.pathHops,
-			pathSkills: graph.pathSkills,
-			pathRelTypes: graph.pathRelTypes,
-		};
-	}
-
-	return {
-		skill: jobSkillLabel,
-		required: REQUIRED_SCORE,
-		user: 0,
-		matchType: 'none',
-	};
+	return axes;
 }
 
 async function loadAvailableResumes(applierName) {
@@ -137,13 +62,9 @@ async function loadAvailableResumes(applierName) {
 			resumeId: PROFILE_GRAPH_ID,
 		});
 		if (profileGraph?.skills?.length) {
-			options.unshift({
-				resumeId: PROFILE_GRAPH_ID,
-				label: 'Profile (aggregated)',
-			});
+			options.unshift({ resumeId: PROFILE_GRAPH_ID, label: 'Profile (aggregated)' });
 		}
 	}
-
 	return options;
 }
 
@@ -158,34 +79,19 @@ async function loadUserGraphSkills(applierName, resumeId) {
 
 function pickDefaultResumeId(requestedResumeId, recommendedResumeId, recommendedTechStack, availableResumes) {
 	const availableIds = new Set(availableResumes.map((r) => r.resumeId));
-
-	if (requestedResumeId && availableIds.has(String(requestedResumeId))) {
-		return String(requestedResumeId);
-	}
-
-	if (recommendedResumeId && availableIds.has(String(recommendedResumeId))) {
-		return String(recommendedResumeId);
-	}
-
+	if (requestedResumeId && availableIds.has(String(requestedResumeId))) return String(requestedResumeId);
+	if (recommendedResumeId && availableIds.has(String(recommendedResumeId))) return String(recommendedResumeId);
 	if (recommendedTechStack) {
 		const norm = String(recommendedTechStack).trim().toLowerCase();
 		const exact = availableResumes.find((r) => r.label.trim().toLowerCase() === norm);
 		if (exact) return exact.resumeId;
-
-		const partial = availableResumes.find(
-			(r) =>
-				r.label.toLowerCase().includes(norm) ||
-				norm.includes(r.label.trim().toLowerCase()),
-		);
-		if (partial) return partial.resumeId;
 	}
-
 	const concrete = availableResumes.find((r) => r.resumeId !== PROFILE_GRAPH_ID);
 	return concrete?.resumeId ?? availableResumes[0]?.resumeId ?? PROFILE_GRAPH_ID;
 }
 
 /**
- * Fast vector + graph resume pick for a job (JD header).
+ * Recommend best resume for a job using per-resume skill coverage.
  */
 export async function buildJobResumeRank({ jobId, applierName }) {
 	const name = String(applierName || '').trim();
@@ -194,31 +100,15 @@ export async function buildJobResumeRank({ jobId, applierName }) {
 
 	const availableResumes = await loadAvailableResumes(name);
 	if (!availableResumes.length) {
-		return {
-			availableResumes,
-			recommendedResumeId: null,
-			recommendedResumeTechStack: null,
-		};
+		return { availableResumes, recommendedResumeId: null, recommendedResumeTechStack: null };
 	}
 
 	const job = jobsCollection
-		? await jobsCollection.findOne(
-			{ _id: new ObjectId(jobId) },
-			{ projection: { skills: 1 } },
-		)
+		? await jobsCollection.findOne({ _id: new ObjectId(jobId) }, { projection: { skills: 1, skillsNormalized: 1 } })
 		: null;
-	const jobSkills = Array.isArray(job?.skills) ? job.skills : [];
-
-	let jobVector = (await getJobVector(String(jobId)))?.vector;
-	if (!jobVector?.length) {
-		const embed = await upsertJobEmbedding(String(jobId), { applierName: name });
-		if (embed.ok) {
-			jobVector = (await getJobVector(String(jobId)))?.vector;
-		}
-	}
-
-	const resumeEntries = jobVector?.length ? await loadResumeVectorEntries(name) : [];
-	const weights = getMatchScoreWeights();
+	const jobSkills = job?.skillsNormalized?.length
+		? job.skillsNormalized
+		: normalizeJobSkills(job?.skills || []);
 
 	let bestResumeId = null;
 	let bestScore = -1;
@@ -226,32 +116,25 @@ export async function buildJobResumeRank({ jobId, applierName }) {
 
 	for (const resume of availableResumes) {
 		if (resume.resumeId === PROFILE_GRAPH_ID) continue;
-
-		const vectorEntry = resumeEntries.find((e) => e.resumeId === resume.resumeId);
-		const vectorScore = vectorEntry && jobVector?.length
-			? cosineSimilarity(jobVector, vectorEntry.vector)
-			: 0;
-
-		let graphBoost = 0;
-		if (jobSkills.length && isNeo4jReady()) {
-			const userSkills = await loadUserGraphSkills(name, resume.resumeId);
-			if (userSkills.length) {
-				graphBoost = await computeGraphBoost(jobSkills, userSkills);
-			}
+		const userSkills = await loadUserGraphSkills(name, resume.resumeId);
+		const profileSet = new Set();
+		for (const s of userSkills) {
+			const c = toCanonical(s.surfaceForm || s.name || '');
+			if (c) profileSet.add(c);
 		}
-
-		const combined = vectorScore * weights.vector + (graphBoost / 100) * weights.graph;
-		if (combined > bestScore) {
-			bestScore = combined;
+		if (!profileSet.size) {
+			const global = await loadProfileSkillSet(name);
+			for (const g of global) profileSet.add(g);
+		}
+		const { matchScore } = computeCoverageScore(jobSkills, profileSet);
+		if (matchScore > bestScore) {
+			bestScore = matchScore;
 			bestResumeId = resume.resumeId;
 			bestLabel = resume.label;
 		}
 	}
 
-	const vectorRank = await rankResumesForJob(String(jobId), name);
-
 	const recommendedResumeId = bestResumeId
-		?? vectorRank?.resumeId
 		?? availableResumes.find((r) => r.resumeId !== PROFILE_GRAPH_ID)?.resumeId
 		?? availableResumes[0]?.resumeId
 		?? null;
@@ -260,14 +143,13 @@ export async function buildJobResumeRank({ jobId, applierName }) {
 		availableResumes,
 		recommendedResumeId,
 		recommendedResumeTechStack: bestLabel
-			?? vectorRank?.techStack
 			?? availableResumes.find((r) => r.resumeId === recommendedResumeId)?.label
 			?? null,
 	};
 }
 
 /**
- * Build skill-match radar axes for a job vs a user resume graph.
+ * Skill-match radar for a job vs selected resume profile skills.
  */
 export async function buildJobSkillRadar({
 	jobId,
@@ -304,51 +186,43 @@ export async function buildJobSkillRadar({
 			availableResumes,
 			recommendedResumeId: null,
 			recommendedResumeTechStack: null,
-			neo4jReady: isNeo4jReady(),
+			matchScore: 0,
+			skillsCovered: 0,
+			skillsRequired: 0,
 		};
 	}
 
-	const vectorRank = await rankResumesForJob(String(jobId), name);
-	const vectorRecommendedId = vectorRank?.resumeId ?? null;
-	const vectorRecommendedLabel = vectorRank?.techStack ?? null;
-
-	const resolvedRecommendedId = pickDefaultResumeId(
-		undefined,
-		vectorRecommendedId ?? recommendedResumeId,
-		vectorRecommendedLabel ?? recommendedTechStack,
-		availableResumes,
-	);
-
+	const rank = await buildJobResumeRank({ jobId, applierName });
 	const chosenResumeId = pickDefaultResumeId(
 		resumeId,
-		vectorRecommendedId ?? recommendedResumeId,
-		vectorRecommendedLabel ?? recommendedTechStack,
+		rank.recommendedResumeId ?? recommendedResumeId,
+		rank.recommendedResumeTechStack ?? recommendedTechStack,
 		availableResumes,
 	);
-	const resumeMeta = availableResumes.find((r) => r.resumeId === chosenResumeId)
-		|| availableResumes[0];
+	const resumeMeta = availableResumes.find((r) => r.resumeId === chosenResumeId) || availableResumes[0];
 
 	const userSkills = await loadUserGraphSkills(name, resumeMeta.resumeId);
-	const jobSkills = (Array.isArray(job.skills) ? job.skills : [])
+	const profileSkills = await loadProfileSkillSet(name);
+	for (const s of userSkills) {
+		const c = toCanonical(s.surfaceForm || s.name || '');
+		if (c) profileSkills.add(c);
+	}
+
+	const jobSkillLabels = (Array.isArray(job.skills) ? job.skills : [])
 		.map(String)
 		.map((s) => s.trim())
-		.filter(Boolean)
-		.slice(0, MAX_RADAR_AXES);
+		.filter(Boolean);
 
-	const resolvedMap = await resolveMany(jobSkills, { enqueueIfMissing: false });
+	const jobSkillsNorm = job.skillsNormalized?.length
+		? job.skillsNormalized
+		: normalizeJobSkills(jobSkillLabels);
 
-	const axes = [];
-	for (const skill of jobSkills) {
-		const key = normalizeSkillKey(skill);
-		const resolved = [...resolvedMap.values()].find((v) => v.normalizedKey === key)
-			|| resolvedMap.get(key);
-		axes.push(await scoreJobSkillAxis(skill, resolved, userSkills));
-	}
+	const coverage = computeCoverageScore(jobSkillsNorm, profileSkills);
+	const axes = buildAxesFromCoverage(jobSkillLabels, profileSkills, userSkills);
 
 	const summary = axes.reduce(
 		(acc, axis) => {
 			if (axis.matchType === 'direct') acc.direct += 1;
-			else if (axis.matchType === 'graph') acc.graph += 1;
 			else acc.missing += 1;
 			return acc;
 		},
@@ -361,11 +235,12 @@ export async function buildJobSkillRadar({
 		axes,
 		summary,
 		availableResumes,
-		recommendedResumeId: resolvedRecommendedId,
-		recommendedResumeTechStack: vectorRecommendedLabel
-			?? availableResumes.find((r) => r.resumeId === resolvedRecommendedId)?.label
-			?? null,
-		neo4jReady: isNeo4jReady(),
+		recommendedResumeId: rank.recommendedResumeId,
+		recommendedResumeTechStack: rank.recommendedResumeTechStack,
+		matchScore: coverage.matchScore,
+		skillsCovered: coverage.covered.length,
+		skillsRequired: coverage.required,
+		skillsMissing: coverage.missing,
 		skillAnalysisStatus: job.skillAnalysis?.status ?? 'pending',
 	};
 }
