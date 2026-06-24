@@ -6,7 +6,7 @@
 //   - openai   → https://api.openai.com/v1   (gpt-* models)
 //   - deepseek → https://api.deepseek.com/v1 (deepseek-v4-* models)
 
-import { costFromUsage, findPricing } from "../../../../codex/core-backend/src/pricing.mjs";
+import { costFromUsage, findPricing } from "../../../../codex(legacy)/core-backend/src/pricing.mjs";
 
 export const PROVIDERS = {
   openai: {
